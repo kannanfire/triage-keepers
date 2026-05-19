@@ -67,7 +67,14 @@ JPG → MediaPipe Face Landmarker → eye landmarks → eye-region bbox
 
 ### Face detection: MediaPipe Face Landmarker
 
-478 facial landmarks per face including eye-specific landmarks. Multi-face capable. Free, local, no cloud.
+478 facial landmarks per face including eye-specific landmarks. Multi-face capable. Free, local, no cloud. Requires the `face_landmarker.task` model file (~26MB) downloaded separately from `storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task` — not bundled with the pip package. Eye-region bbox computed from canonical face-mesh eye-contour indices:
+
+```
+LEFT_EYE  = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+RIGHT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+```
+
+Bbox = min/max x,y across the index set, multiplied by image dimensions (MediaPipe returns normalized [0.0, 1.0] coordinates).
 
 **Handling:**
 - Multi-face: store `min(eye_sharpness)` and `max(eye_sharpness)` per photo. Agent decides which matters.
@@ -85,8 +92,13 @@ Source: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
 import cv2
 NORM_SIZE = 128  # eye crops resized to NORM_SIZE × NORM_SIZE before Laplacian
 
-def eye_sharpness(image, eye_bbox):
-    crop = image[eye_bbox.y:eye_bbox.y+eye_bbox.h, eye_bbox.x:eye_bbox.x+eye_bbox.w]
+def eye_sharpness(image, face_landmarks, eye_indices):
+    img_h, img_w = image.shape[:2]
+    # MediaPipe landmarks are normalized [0.0, 1.0]; convert to pixel coords
+    xs = [int(face_landmarks[i].x * img_w) for i in eye_indices]
+    ys = [int(face_landmarks[i].y * img_h) for i in eye_indices]
+    x, y, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+    crop = image[y:y2, x:x2]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     normalized = cv2.resize(gray, (NORM_SIZE, NORM_SIZE), interpolation=cv2.INTER_LINEAR)
     return cv2.Laplacian(normalized, cv2.CV_64F).var()
@@ -195,7 +207,7 @@ The vision-confirmation pattern is the most differentiated piece. It's a real pr
 | Component | Library | Confidence |
 |---|---|---|
 | MCP server | `mcp` Python SDK (FastMCP) | High |
-| Face / eye landmarks | `mediapipe` | High |
+| Face / eye landmarks | `mediapipe` (requires `face_landmarker.task` download) | High |
 | Image I/O | `Pillow` | High |
 | CV ops | `opencv-python` (headless) | High |
 | Perceptual hash | `imagehash` | High |
