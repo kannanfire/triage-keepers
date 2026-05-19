@@ -209,7 +209,7 @@ def main(folder: str, output_csv: str = "scores.csv", model: str = MODEL_FILENAM
         running_mode=mp_vision.RunningMode.IMAGE,
         num_faces=10,
         min_face_detection_confidence=0.5,
-        min_face_presence_score=0.5,
+        min_face_presence_confidence=0.5,
         output_face_blendshapes=False,
         output_facial_transformation_matrixes=False,
     )
