@@ -228,6 +228,7 @@ Install footprint ~250MB (MediaPipe brings TF Lite). All local, free.
 | pHash burst threshold needs per-style tuning | High | Tunable parameter; default 5; calibrate on real bursts |
 | 10K-photo index takes hours, feels bad | Medium | Threading, progress reporting, checkpoint writes |
 | MCP image-return format has undocumented edge cases | Low-Medium | Test `get_thumbnail` on evening 3, before building dependent tools |
+| CLI script accepts invalid args silently (prototype limitation) | Low | Add `argparse` for proper validation during evening 6 tooling phase |
 
 ---
 

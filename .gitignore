@@ -5,6 +5,9 @@ __pycache__/
 
 triage-keepers-plan.md
 .DS_Store
+temp/
+untitled folder/
+
 
 # C extensions
 *.so
