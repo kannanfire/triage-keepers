@@ -26,6 +26,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from PIL import Image as PILImage
+import imagehash
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -228,6 +229,34 @@ def extract_exif(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Perceptual hashing (burst grouping)
+# ---------------------------------------------------------------------------
+
+def compute_phash(path: Path) -> str:
+    """
+    Compute perceptual hash (pHash) of image for burst grouping.
+
+    pHash is a 64-bit fingerprint of an image's visual content via DCT
+    (discrete cosine transform). Visually similar images (near-duplicates)
+    have Hamming distances <= 5–10 bits; completely different images
+    typically differ in 30+ bits.
+
+    Used in evening 7 to group burst sequences: walk a folder, group by pHash,
+    rank within each group by eye sharpness, surface top candidate to Claude
+    for visual confirmation.
+
+    path: Path to JPG file
+    Returns: hex string representation of pHash (e.g. "a1b2c3d4e5f6a7b8")
+    """
+    try:
+        img = PILImage.open(path)
+        h = imagehash.phash(img)
+        return str(h)
+    except Exception as e:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Per-image scoring
 # ---------------------------------------------------------------------------
 
@@ -295,7 +324,8 @@ def score_image(path: Path, detector) -> dict | None:
             }
 
     exif = extract_exif(path)
-    return {**base, **cv_scores, **exif}
+    phash = compute_phash(path)
+    return {**base, **cv_scores, **exif, "phash": phash}
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +349,7 @@ FIELDNAMES = [
     "eye_sharpness_min", "eye_sharpness_max",
     "whole_image_sharpness", "fallback_used",
     "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
+    "phash",
 ]
 
 
