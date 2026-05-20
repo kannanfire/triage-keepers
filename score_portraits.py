@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-triage-keepers — Evening 1 prototype
+triage-keepers — Evening 1 + 5 prototype
 
-Scores eye-region sharpness for portrait JPGs using MediaPipe Face Landmarker
-+ Laplacian variance. No MCP, no cache — throwaway script to validate the CV claim.
+Scores eye-region sharpness and extracts camera metadata for portrait JPGs using
+MediaPipe Face Landmarker + Laplacian variance. Validates CV claim and indexes
+metadata for caching (no MCP yet in this script, but scores feed into server.py).
 
 Usage:
     python score_portraits.py <folder> [output.csv] [model.task]
 
 Output CSV columns:
     path, face_count, eye_sharpness_min, eye_sharpness_max,
-    whole_image_sharpness, fallback_used
+    whole_image_sharpness, fallback_used, iso, shutter, aperture,
+    focal_length, camera, taken_at
 """
 
 import csv
@@ -23,6 +25,7 @@ import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
+from PIL import Image as PILImage
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -51,10 +54,30 @@ VISIBILITY_MIN = 0.5  # landmarks below this are treated as not visible
 # ---------------------------------------------------------------------------
 
 def _laplacian_var(gray: np.ndarray) -> float:
+    """
+    Compute Laplacian variance on grayscale image.
+
+    Laplacian is a second-derivative edge-detection filter. High-contrast edges
+    (sharp focus) produce large variance; smooth/blurred regions produce small.
+    This is the core metric for focus quality.
+
+    gray: grayscale numpy array (H x W, single channel)
+    Returns: float variance of Laplacian operator applied to gray
+    """
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def whole_image_sharpness(bgr: np.ndarray) -> float:
+    """
+    Compute sharpness score for entire image via normalized Laplacian variance.
+
+    Used as fallback when face detection fails (no eye region to score).
+    Normalizes to NORM_WHOLE_SIZE (512x512) so scores are comparable across
+    different camera resolutions and zoom levels.
+
+    bgr: BGR image from cv2.imread() (H x W x 3)
+    Returns: float Laplacian variance on normalized grayscale
+    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     thumb = cv2.resize(gray, (NORM_WHOLE_SIZE, NORM_WHOLE_SIZE), interpolation=cv2.INTER_LINEAR)
     return _laplacian_var(thumb)
@@ -62,8 +85,19 @@ def whole_image_sharpness(bgr: np.ndarray) -> float:
 
 def _eye_bbox(face_lms, eye_indices: list[int], img_w: int, img_h: int) -> tuple | None:
     """
-    Padded pixel bbox for one eye.  Returns (x, y, w, h) or None if fewer
-    than 4 landmarks clear the visibility threshold.
+    Compute padded bounding box for one eye region from MediaPipe landmarks.
+
+    MediaPipe returns normalized [0.0, 1.0] coordinates. This function:
+    1. Filters landmarks by visibility (>= VISIBILITY_MIN or 0.0)
+    2. Requires at least 4 visible landmarks to form meaningful bbox
+    3. Computes axis-aligned bbox from min/max x,y
+    4. Adds EYE_PAD (20%) padding on all sides to include context
+    5. Clamps to image bounds to prevent out-of-bounds crops
+
+    face_lms: list of 478 MediaPipe landmarks (NormalizedLandmark objects)
+    eye_indices: list of 16 landmark indices defining one eye contour
+    img_w, img_h: image width and height in pixels
+    Returns: (x, y, w, h) in pixel coords, or None if too few visible landmarks
     """
     visible = []
     for idx in eye_indices:
@@ -97,8 +131,16 @@ def _eye_bbox(face_lms, eye_indices: list[int], img_w: int, img_h: int) -> tuple
 
 def _score_eye(bgr: np.ndarray, bbox: tuple) -> float | None:
     """
-    Score one eye region.  Returns None if the pre-resize width is below
-    MIN_EYE_WIDTH (upscaling can't recover sharpness that isn't there).
+    Score sharpness of one eye crop via normalized Laplacian variance.
+
+    Crops the eye region from the full image, converts to grayscale, resizes to
+    NORM_EYE_SIZE (128x128) for scale-independent scoring, then computes Laplacian
+    variance. Returns None if the crop is too small (w < MIN_EYE_WIDTH) — upscaling
+    won't recover sharpness information that isn't present.
+
+    bgr: full BGR image (H x W x 3)
+    bbox: (x, y, w, h) pixel coordinates from _eye_bbox()
+    Returns: float Laplacian variance, or None if crop too narrow to be meaningful
     """
     x, y, w, h = bbox
     if w < MIN_EYE_WIDTH:
@@ -114,12 +156,103 @@ def _score_eye(bgr: np.ndarray, bbox: tuple) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# EXIF extraction
+# ---------------------------------------------------------------------------
+
+def extract_exif(path: Path) -> dict:
+    """
+    Extract camera metadata from JPG EXIF tags.
+
+    Pillow's getexif() returns all EXIF IFD tags as a dict keyed by integer tag IDs.
+    Extracts specific tags defined by the EXIF standard:
+    - 34855 (ISOSpeedRatings): ISO sensitivity (int)
+    - 33434 (ExposureTime): shutter speed as Fraction, converted to string "1/250" (str)
+    - 33437 (FNumber): aperture as Fraction, converted to float (float)
+    - 37386 (FocalLength): focal length in mm as Fraction, converted to float (float)
+    - 271 (Model): camera model name (str)
+    - 36867 (DateTimeOriginal): shot datetime in "YYYY:MM:DD HH:MM:SS" format (str)
+
+    path: Path to JPG file
+    Returns: dict with keys {iso, shutter, aperture, focal_length, camera, taken_at}
+             Missing tags are set to None.
+    """
+    exif_dict = {
+        "iso": None,
+        "shutter": None,
+        "aperture": None,
+        "focal_length": None,
+        "camera": None,
+        "taken_at": None,
+    }
+
+    try:
+        img = PILImage.open(path)
+        exif = img.getexif()
+
+        if exif:
+            if 34855 in exif:
+                exif_dict["iso"] = int(exif[34855])
+
+            if 33434 in exif:
+                frac = exif[33434]
+                if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
+                    exif_dict["shutter"] = f"{frac.numerator}/{frac.denominator}"
+                else:
+                    exif_dict["shutter"] = str(frac)
+
+            if 33437 in exif:
+                frac = exif[33437]
+                if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
+                    exif_dict["aperture"] = float(frac.numerator) / float(frac.denominator)
+                else:
+                    exif_dict["aperture"] = float(frac)
+
+            if 37386 in exif:
+                frac = exif[37386]
+                if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
+                    exif_dict["focal_length"] = float(frac.numerator) / float(frac.denominator)
+                else:
+                    exif_dict["focal_length"] = float(frac)
+
+            if 271 in exif:
+                exif_dict["camera"] = str(exif[271]).strip()
+
+            if 36867 in exif:
+                dt_str = str(exif[36867])
+                exif_dict["taken_at"] = dt_str
+
+    except Exception as e:
+        pass
+
+    return exif_dict
+
+
+# ---------------------------------------------------------------------------
 # Per-image scoring
 # ---------------------------------------------------------------------------
 
 def score_image(path: Path, detector) -> dict | None:
     """
-    Score one JPG.  Returns a CSV row dict, or None if the file is unreadable.
+    Score one JPG: CV pipeline (face detection, eye sharpness) + EXIF metadata.
+
+    Pipeline:
+    1. Load JPG with cv2.imread() → return None if unreadable
+    2. Compute whole_image_sharpness (fallback metric)
+    3. Run MediaPipe face detection on RGB conversion
+    4. If faces detected:
+       a. For each face, compute eye bboxes (LEFT_EYE, RIGHT_EYE)
+       b. Score each eye region with Laplacian variance
+       c. Store min/max scores
+    5. If no faces or no scoreable eyes, set fallback_used=True
+    6. Extract EXIF metadata (iso, shutter, aperture, focal_length, camera, taken_at)
+    7. Merge EXIF into return dict
+
+    path: Path to JPG file
+    detector: initialized MediaPipe FaceLandmarker
+    Returns: dict with keys {path, face_count, eye_sharpness_min, eye_sharpness_max,
+                             whole_image_sharpness, fallback_used, iso, shutter,
+                             aperture, focal_length, camera, taken_at}
+             or None if file is unreadable
     """
     bgr = cv2.imread(str(path))
     if bgr is None:
@@ -140,28 +273,29 @@ def score_image(path: Path, detector) -> dict | None:
     }
 
     if n_faces == 0:
-        return {**base, "eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+        cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+    else:
+        scores: list[float] = []
+        for face_lms in result.face_landmarks:
+            for eye_indices in (LEFT_EYE, RIGHT_EYE):
+                bbox = _eye_bbox(face_lms, eye_indices, img_w, img_h)
+                if bbox is None:
+                    continue
+                s = _score_eye(bgr, bbox)
+                if s is not None:
+                    scores.append(s)
 
-    scores: list[float] = []
-    for face_lms in result.face_landmarks:
-        for eye_indices in (LEFT_EYE, RIGHT_EYE):
-            bbox = _eye_bbox(face_lms, eye_indices, img_w, img_h)
-            if bbox is None:
-                continue
-            s = _score_eye(bgr, bbox)
-            if s is not None:
-                scores.append(s)
+        if not scores:
+            cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+        else:
+            cv_scores = {
+                "eye_sharpness_min": round(min(scores), 4),
+                "eye_sharpness_max": round(max(scores), 4),
+                "fallback_used":     False,
+            }
 
-    if not scores:
-        # Face detected but no eye was scoreable (occlusion, too small, etc.)
-        return {**base, "eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
-
-    return {
-        **base,
-        "eye_sharpness_min": round(min(scores), 4),
-        "eye_sharpness_max": round(max(scores), 4),
-        "fallback_used":     False,
-    }
+    exif = extract_exif(path)
+    return {**base, **cv_scores, **exif}
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +318,22 @@ FIELDNAMES = [
     "path", "face_count",
     "eye_sharpness_min", "eye_sharpness_max",
     "whole_image_sharpness", "fallback_used",
+    "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
 ]
 
 
 def main(folder: str, output_csv: str = "scores.csv", model: str = MODEL_FILENAME) -> None:
+    """
+    Index a folder of JPGs: detect faces, score eye sharpness, extract EXIF.
+
+    Walks folder (recursive) for all JPGs, initializes MediaPipe detector,
+    calls score_image() on each file (which includes EXIF extraction),
+    and writes results to CSV. Logs errors but continues indexing.
+
+    folder: path to folder (or root of folder tree)
+    output_csv: output filename (default "scores.csv")
+    model: path to face_landmarker.task (auto-downloaded if missing)
+    """
     folder_path = Path(folder).resolve()
     if not folder_path.is_dir():
         sys.exit(f"Not a directory: {folder_path}")
@@ -202,7 +348,7 @@ def main(folder: str, output_csv: str = "scores.csv", model: str = MODEL_FILENAM
     if not jpgs:
         sys.exit(f"No JPG/JPEG files found in {folder_path}")
 
-    print(f"{len(jpgs)} JPGs found. Scoring…")
+    print(f"{len(jpgs)} JPGs found. Scoring and extracting EXIF…")
 
     options = mp_vision.FaceLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
