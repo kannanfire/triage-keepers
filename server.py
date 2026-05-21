@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-triage-keepers MCP server — Evenings 3–6.
+triage-keepers MCP server — Evenings 3–7.
 Tools: list_folders, get_thumbnail, index_folder, assess_subject_sharpness,
-find_unsharp_subjects, find_no_subject, get_metadata.
+find_unsharp_subjects, find_no_subject, get_metadata, find_burst_groups,
+rank_burst_group, get_pair, find_orphans.
 """
 
 import io
@@ -212,6 +213,196 @@ def get_metadata(path: str) -> dict:
         return {"error": f"Not in cache: {path}"}
 
     return row
+
+
+@mcp.tool()
+def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
+    """
+    Find groups of near-duplicate photos (bursts) via pHash clustering.
+
+    Groups photos by perceptual hash (Hamming distance <= hamming threshold).
+    Each group represents a sequence of frames shot in rapid succession with
+    nearly identical composition.
+
+    Algorithm: greedy clustering — start with first ungrouped photo, find all
+    others within hamming threshold (directly or transitively), form group,
+    repeat until all grouped.
+
+    folder: folder path to scan
+    hamming: max Hamming distance to group (default 5; typical burst threshold)
+    Returns: list of groups, each group is list of file paths, sorted by
+             eye_sharpness_min descending (sharpest candidates first)
+    """
+    conn = _get_conn()
+    photos = _cache.get_photos_in_folder(conn, folder)
+
+    if not photos:
+        return []
+
+    groups = _cache.group_by_phash(photos, hamming)
+
+    result = []
+    for group in groups:
+        if len(group) == 1:
+            result.append([group[0]["path"]])
+        else:
+            sorted_group = sorted(
+                group,
+                key=lambda p: float(p.get("eye_sharpness_min", 0)) if p.get("eye_sharpness_min") else 0,
+                reverse=True
+            )
+            result.append([p["path"] for p in sorted_group])
+
+    return result
+
+
+@mcp.tool()
+def rank_burst_group(file_paths: list[str]) -> list[dict]:
+    """
+    Rank photos within a burst group by eye sharpness and surface EXIF deltas.
+
+    Takes a group of near-duplicates (from find_burst_groups) and ranks by
+    eye_sharpness_min (highest first). Also computes ISO/shutter/aperture
+    deltas to show exposure bracketing or camera adjustments.
+
+    file_paths: list of absolute paths to JPGs in one burst group
+    Returns: list of dicts, sorted by eye_sharpness_min descending, with
+             fields: path, face_count, eye_sharpness_min, eye_sharpness_max,
+             fallback_used, iso, shutter, aperture, exif_deltas
+    """
+    conn = _get_conn()
+    photos = []
+    for path in file_paths:
+        row = _cache.get_photo(conn, path)
+        if row:
+            photos.append(row)
+
+    if not photos:
+        return []
+
+    photos.sort(
+        key=lambda p: float(p.get("eye_sharpness_min", 0)) if p.get("eye_sharpness_min") else 0,
+        reverse=True
+    )
+
+    iso_vals = [p.get("iso") for p in photos if p.get("iso")]
+    shutter_vals = [p.get("shutter") for p in photos if p.get("shutter")]
+    aperture_vals = [p.get("aperture") for p in photos if p.get("aperture")]
+
+    result = []
+    for p in photos:
+        result.append({
+            "path": p.get("path"),
+            "face_count": p.get("face_count"),
+            "eye_sharpness_min": p.get("eye_sharpness_min"),
+            "eye_sharpness_max": p.get("eye_sharpness_max"),
+            "fallback_used": p.get("fallback_used"),
+            "iso": p.get("iso"),
+            "shutter": p.get("shutter"),
+            "aperture": p.get("aperture"),
+            "camera": p.get("camera"),
+            "taken_at": p.get("taken_at"),
+            "exif_deltas": {
+                "iso_range": f"{min(iso_vals)}-{max(iso_vals)}" if iso_vals else "N/A",
+                "shutter_range": f"{min(shutter_vals)}-{max(shutter_vals)}" if shutter_vals else "N/A",
+                "aperture_range": f"{min(aperture_vals)}-{max(aperture_vals)}" if aperture_vals else "N/A",
+            }
+        })
+
+    return result
+
+
+@mcp.tool()
+def get_pair(basename: str, folder: str) -> dict:
+    """
+    Find RAW + JPG pairing for a photo.
+
+    Given a JPG basename (e.g. "IMG_7102.JPG"), look for a sibling RAW file
+    with the same basename but .CR2, .NEF, .ARW extension (Canon, Nikon, Sony).
+    Return pairing status and file paths.
+
+    basename: filename with extension (e.g. "IMG_7102.JPG")
+    folder: folder to search (should contain both JPG and RAW files)
+    Returns: dict with jpg, raw, status (one of "paired", "jpg_only", "raw_only"),
+             jpg_size, raw_size
+    """
+    folder_path = Path(folder).resolve()
+    name_stem = Path(basename).stem
+
+    jpg_path = None
+    raw_path = None
+
+    for f in folder_path.iterdir():
+        if f.stem.upper() == name_stem.upper():
+            if f.suffix.upper() in {".JPG", ".JPEG"}:
+                jpg_path = f
+            elif f.suffix.upper() in {".CR2", ".NEF", ".ARW", ".RW2", ".DNG"}:
+                raw_path = f
+
+    jpg_size = jpg_path.stat().st_size if jpg_path else None
+    raw_size = raw_path.stat().st_size if raw_path else None
+
+    if jpg_path and raw_path:
+        status = "paired"
+    elif jpg_path:
+        status = "jpg_only"
+    elif raw_path:
+        status = "raw_only"
+    else:
+        status = "not_found"
+
+    return {
+        "basename": basename,
+        "jpg": str(jpg_path) if jpg_path else None,
+        "raw": str(raw_path) if raw_path else None,
+        "status": status,
+        "jpg_size": jpg_size,
+        "raw_size": raw_size,
+    }
+
+
+@mcp.tool()
+def find_orphans(folder: str) -> dict:
+    """
+    Find unpaired RAW and JPG files in folder.
+
+    RAWs without JPGs: user may have deleted JPG after processing.
+    JPGs without RAWs: shot in JPG-only mode, or RAW deleted/moved.
+
+    folder: folder path to scan
+    Returns: dict with raw_orphans (list of RAW paths) and jpg_orphans
+             (list of JPG paths with no RAW sibling)
+    """
+    folder_path = Path(folder).resolve()
+
+    raw_extensions = {".CR2", ".NEF", ".ARW", ".RW2", ".DNG"}
+    jpg_extensions = {".JPG", ".JPEG"}
+
+    stems_with_jpg = set()
+    stems_with_raw = set()
+
+    for f in folder_path.iterdir():
+        if f.suffix.upper() in jpg_extensions:
+            stems_with_jpg.add(f.stem.upper())
+        elif f.suffix.upper() in raw_extensions:
+            stems_with_raw.add(f.stem.upper())
+
+    raw_orphans = []
+    jpg_orphans = []
+
+    for f in folder_path.iterdir():
+        stem = f.stem.upper()
+        if f.suffix.upper() in raw_extensions and stem not in stems_with_jpg:
+            raw_orphans.append(str(f))
+        elif f.suffix.upper() in jpg_extensions and stem not in stems_with_raw:
+            jpg_orphans.append(str(f))
+
+    return {
+        "raw_orphans": sorted(raw_orphans),
+        "jpg_orphans": sorted(jpg_orphans),
+        "raw_count": len(raw_orphans),
+        "jpg_count": len(jpg_orphans),
+    }
 
 
 if __name__ == "__main__":
