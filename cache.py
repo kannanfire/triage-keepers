@@ -58,3 +58,47 @@ def needs_reindex(conn: sqlite3.Connection, path: str, mtime: float, size: int) 
     if row is None:
         return True
     return row[0] != mtime or row[1] != size
+
+
+def get_photo(conn: sqlite3.Connection, path: str) -> dict | None:
+    """
+    Retrieve one photo record by absolute path.
+
+    path: absolute file path (as stored in cache)
+    Returns: dict with all columns, or None if not in cache
+    """
+    row = conn.execute(
+        "SELECT * FROM photos WHERE path = ?", (path,)
+    ).fetchone()
+    if row is None:
+        return None
+    cols = _COLUMNS
+    return dict(zip(cols, row))
+
+
+def get_photos_in_folder(conn: sqlite3.Connection, folder: str) -> list[dict]:
+    """
+    Retrieve all photos cached under a folder path (recursive).
+
+    folder: folder path (will match paths starting with this prefix)
+    Returns: list of dicts, one per photo
+    """
+    folder_path = Path(folder).resolve()
+    prefix = str(folder_path) + "/"
+    rows = conn.execute(
+        "SELECT * FROM photos WHERE path LIKE ? ORDER BY path",
+        (f"{prefix}%",)
+    ).fetchall()
+    cols = _COLUMNS
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def get_all_photos(conn: sqlite3.Connection) -> list[dict]:
+    """
+    Retrieve all cached photos (unfiltered).
+
+    Returns: list of dicts, one per photo
+    """
+    rows = conn.execute("SELECT * FROM photos ORDER BY path").fetchall()
+    cols = _COLUMNS
+    return [dict(zip(cols, row)) for row in rows]
