@@ -475,5 +475,59 @@ def find_orphans(folder: str) -> dict:
     }
 
 
+@mcp.tool()
+def summarize_folder(folder: str) -> dict:
+    """
+    Aggregate stats for all indexed photos in a folder.
+
+    Returns counts, sharpness distribution (min/max/mean/median for
+    eye-scored photos), and burst group count. Useful as a first call
+    before running sharpness or burst flows.
+
+    folder: folder path to scan
+    Returns: dict with total, face_detected, fallback_count, no_face_count,
+             sharpness_min, sharpness_max, sharpness_mean, sharpness_median,
+             burst_group_count (groups of 2+)
+    """
+    import statistics
+    conn = _get_conn()
+    photos = _cache.get_photos_in_folder(conn, folder)
+
+    if not photos:
+        return {"total": 0, "error": "No indexed photos in folder. Run index_folder first."}
+
+    total = len(photos)
+    face_detected = sum(1 for p in photos if p.get("face_count", 0) and int(p["face_count"]) > 0)
+    no_face = sum(1 for p in photos if not p.get("face_count") or int(p.get("face_count", 0)) == 0)
+    fallback_count = sum(1 for p in photos if p.get("fallback_used"))
+
+    eye_scores = [
+        float(p["eye_sharpness_min"])
+        for p in photos
+        if p.get("eye_sharpness_min") and not p.get("fallback_used")
+    ]
+
+    sharpness_stats = {}
+    if eye_scores:
+        sharpness_stats = {
+            "sharpness_min":    round(min(eye_scores), 2),
+            "sharpness_max":    round(max(eye_scores), 2),
+            "sharpness_mean":   round(statistics.mean(eye_scores), 2),
+            "sharpness_median": round(statistics.median(eye_scores), 2),
+        }
+
+    groups = _cache.group_by_phash(photos)
+    burst_group_count = sum(1 for g in groups if len(g) >= 2)
+
+    return {
+        "total":             total,
+        "face_detected":     face_detected,
+        "no_face_count":     no_face,
+        "fallback_count":    fallback_count,
+        "burst_group_count": burst_group_count,
+        **sharpness_stats,
+    }
+
+
 if __name__ == "__main__":
     mcp.run()
