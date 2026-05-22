@@ -8,6 +8,9 @@ rank_burst_group, get_pair, find_orphans.
 
 import io
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+import os
 
 from mcp.server.fastmcp import FastMCP, Image as MCPImage
 from PIL import Image as PILImage
@@ -15,7 +18,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
 import cache as _cache
-from score_portraits import score_image
+from score_portraits import score_image, score_batch
 
 mcp = FastMCP("triage-keepers")
 
@@ -23,6 +26,7 @@ _DB_PATH = Path("~/.triage-keepers/cache.db")
 _MODEL_PATH = Path("face_landmarker.task")
 _conn = None
 _detector = None
+_db_lock = Lock()  # Protects SQLite writes; SQLite is thread-safe but slow under contention
 
 
 def _get_conn():
@@ -69,8 +73,17 @@ def get_thumbnail(path: str, size: int = 512) -> MCPImage:
 
 
 @mcp.tool()
-def index_folder(path: str, recursive: bool = True) -> dict:
-    """Walk path for JPGs, score with CV, upsert cache rows. Returns counts."""
+def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> dict:
+    """
+    Walk path for JPGs, score with CV using thread pool, batch-write cache.
+
+    Uses ThreadPoolExecutor (one detector per worker thread) to parallelize CV
+    scoring. Main thread filters files by mtime/size, batches them, submits
+    batches to workers, and batch-writes results to SQLite with _db_lock to
+    avoid serialization.
+
+    Returns dict: {"total": count, "indexed": count, "skipped": count}
+    """
     p = Path(path).expanduser().resolve()
     if not p.is_dir():
         return {"error": f"Not a directory: {path}"}
@@ -79,23 +92,52 @@ def index_folder(path: str, recursive: bool = True) -> dict:
     jpgs = [f for f in glob if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file()]
 
     conn = _get_conn()
-    detector = _get_detector()
-    indexed = 0
-    skipped = 0
 
+    # Filter to photos needing reindex (main thread checks DB)
+    to_score = []
     for f in jpgs:
         stat = f.stat()
         if _cache.needs_reindex(conn, str(f), stat.st_mtime, stat.st_size):
-            row = score_image(f, detector)
-            if row is not None:
-                row["mtime"] = stat.st_mtime
-                row["size"] = stat.st_size
-                _cache.upsert_photo(conn, row)
-                indexed += 1
-            else:
-                skipped += 1
-        else:
-            skipped += 1
+            to_score.append((f, stat.st_mtime, stat.st_size))
+
+    skipped = len(jpgs) - len(to_score)
+    indexed = 0
+
+    if not to_score:
+        return {"total": len(jpgs), "indexed": 0, "skipped": skipped}
+
+    # Batch scoring with ThreadPoolExecutor
+    # max_workers = max_workers or os.cpu_count() or 4
+    max_workers = 2
+    batch_size = max(1, len(to_score) // (max_workers * 2))
+    batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
+
+    all_rows = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for batch in batches:
+            # Extract just the file paths for scoring
+            batch_paths = [f for f, _, _ in batch]
+            # Create detector per worker to avoid thread-safety issues
+            detector = _get_detector()
+            future = executor.submit(score_batch, batch_paths, detector)
+            futures.append((future, batch))  # Keep batch for mtime/size pairing
+
+        for future, batch in futures:
+            batch_results = future.result()
+            # Pair results with mtime/size
+            for row, (_, mtime, size) in zip(batch_results, batch):
+                if row is not None:
+                    row["mtime"] = mtime
+                    row["size"] = size
+                    all_rows.append(row)
+
+    # Batch-write to SQLite (main thread holds lock for all writes)
+    with _db_lock:
+        for row in all_rows:
+            _cache.upsert_photo(conn, row)
+            indexed += 1
 
     return {"total": len(jpgs), "indexed": indexed, "skipped": skipped}
 

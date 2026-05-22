@@ -19,6 +19,8 @@ import csv
 import sys
 import urllib.request
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import cv2
 import numpy as np
@@ -351,6 +353,81 @@ FIELDNAMES = [
     "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
     "phash",
 ]
+
+
+def score_batch(paths_batch: list[Path], detector) -> list[dict | None]:
+    """
+    Score a batch of photos in worker thread context.
+
+    Worker function for ThreadPoolExecutor. Each thread runs one instance of
+    MediaPipe detector and scores assigned photos. Returns list of row dicts
+    (or None for unreadable files).
+
+    paths_batch: list of Path objects to score
+    detector: initialized MediaPipe FaceLandmarker (thread-safe for IMAGE mode)
+    Returns: list of dicts from score_image(), one per input path
+    """
+    results = []
+    for path in paths_batch:
+        row = score_image(path, detector)
+        results.append(row)
+    return results
+
+
+def score_photos_parallel(folder: str, max_workers: int = 4) -> list[dict]:
+    """
+    Score all JPGs in folder using thread pool (one detector per thread).
+
+    Distributes photos across worker threads. Each worker maintains its own
+    MediaPipe detector instance to avoid thread-safety issues. Main thread
+    collects results. Database writes happen outside this function (caller's
+    responsibility).
+
+    THREADING SAFETY:
+    - MediaPipe detector: thread-safe for IMAGE mode (no shared mutable state)
+    - cv2 operations: thread-safe (each thread operates on independent arrays)
+    - file I/O: thread-safe (each thread reads different file)
+    - No locks needed for CV pipeline — pure computation per photo
+
+    folder: path to folder
+    max_workers: number of worker threads (default 4; tune to CPU count)
+    Returns: list of score dicts (or None entries for failures)
+    """
+    folder_path = Path(folder).resolve()
+    jpgs = sorted(
+        p for p in folder_path.rglob("*")
+        if p.suffix.lower() in {".jpg", ".jpeg"}
+    )
+
+    if not jpgs:
+        return []
+
+    batch_size = max(1, len(jpgs) // (max_workers * 2))
+    batches = [jpgs[i:i + batch_size] for i in range(0, len(jpgs), batch_size)]
+
+    all_results = []
+    detector_options = mp_vision.FaceLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(Path(MODEL_FILENAME))),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_faces=10,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+    )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for batch in batches:
+            detector = mp_vision.FaceLandmarker.create_from_options(detector_options)
+            future = executor.submit(score_batch, batch, detector)
+            futures.append(future)
+
+        for future in futures:
+            batch_results = future.result()
+            all_results.extend(batch_results)
+
+    return all_results
 
 
 def main(folder: str, output_csv: str = "scores.csv", model: str = MODEL_FILENAME) -> None:
