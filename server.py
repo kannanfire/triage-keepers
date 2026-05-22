@@ -24,7 +24,7 @@ from score_portraits import score_image, score_batch
 mcp = FastMCP("triage-keepers")
 
 _DB_PATH = Path("~/.triage-keepers/cache.db")
-_MODEL_PATH = Path("face_landmarker.task")
+_MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
 _conn = None
 _detector = None
 _db_lock = Lock()  # Protects SQLite writes; SQLite is thread-safe but slow under contention
