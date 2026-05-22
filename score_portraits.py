@@ -16,6 +16,7 @@ Output CSV columns:
 """
 
 import csv
+import json
 import sys
 import urllib.request
 from pathlib import Path
@@ -305,16 +306,30 @@ def score_image(path: Path, detector) -> dict | None:
 
     if n_faces == 0:
         cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+        face_bboxes = []
+        eye_bboxes = []
     else:
         scores: list[float] = []
+        face_bboxes = []
+        eye_bboxes = []
         for face_lms in result.face_landmarks:
+            # Face bbox from all 478 landmarks
+            all_xs = [int(lm.x * img_w) for lm in face_lms]
+            all_ys = [int(lm.y * img_h) for lm in face_lms]
+            fx, fy = min(all_xs), min(all_ys)
+            fw, fh = max(all_xs) - fx, max(all_ys) - fy
+            face_bboxes.append([fx, fy, fw, fh])
+
+            per_face_eyes = []
             for eye_indices in (LEFT_EYE, RIGHT_EYE):
                 bbox = _eye_bbox(face_lms, eye_indices, img_w, img_h)
                 if bbox is None:
                     continue
+                per_face_eyes.append(list(bbox))
                 s = _score_eye(bgr, bbox)
                 if s is not None:
                     scores.append(s)
+            eye_bboxes.append(per_face_eyes)
 
         if not scores:
             cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
@@ -327,7 +342,11 @@ def score_image(path: Path, detector) -> dict | None:
 
     exif = extract_exif(path)
     phash = compute_phash(path)
-    return {**base, **cv_scores, **exif, "phash": phash}
+    return {
+        **base, **cv_scores, **exif, "phash": phash,
+        "face_bboxes": json.dumps(face_bboxes) if face_bboxes else None,
+        "eye_bboxes":  json.dumps(eye_bboxes)  if eye_bboxes  else None,
+    }
 
 
 # ---------------------------------------------------------------------------

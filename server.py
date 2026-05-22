@@ -7,6 +7,7 @@ rank_burst_group, get_pair, find_orphans.
 """
 
 import io
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -62,11 +63,38 @@ def list_folders(root: str) -> list[str]:
 
 
 @mcp.tool()
-def get_thumbnail(path: str, size: int = 512) -> MCPImage:
-    """Return a JPEG thumbnail of path, resized to fit within size×size."""
+def get_thumbnail(path: str, size: int = 512, annotate_face: bool = True) -> MCPImage:
+    """Return a JPEG thumbnail with optional face/eye bounding boxes drawn."""
+    from PIL import ImageDraw
     img = PILImage.open(path)
     img = img.convert("RGB")
+    orig_w, orig_h = img.size
     img.thumbnail((size, size), PILImage.LANCZOS)
+    new_w, new_h = img.size
+    scale_x = new_w / orig_w
+    scale_y = new_h / orig_h
+
+    if annotate_face:
+        conn = _get_conn()
+        row = _cache.get_photo(conn, path)
+        if row:
+            draw = ImageDraw.Draw(img)
+            if row.get("face_bboxes"):
+                for x, y, w, h in json.loads(row["face_bboxes"]):
+                    draw.rectangle(
+                        [int(x * scale_x), int(y * scale_y),
+                         int((x + w) * scale_x), int((y + h) * scale_y)],
+                        outline="lime", width=2,
+                    )
+            if row.get("eye_bboxes"):
+                for face_eyes in json.loads(row["eye_bboxes"]):
+                    for x, y, w, h in face_eyes:
+                        draw.rectangle(
+                            [int(x * scale_x), int(y * scale_y),
+                             int((x + w) * scale_x), int((y + h) * scale_y)],
+                            outline="cyan", width=1,
+                        )
+
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return MCPImage(data=buf.getvalue(), format="jpeg")
@@ -205,8 +233,8 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
         if not scoreable:
             return []
         scoreable.sort(key=lambda p: float(p["eye_sharpness_min"]))
-        cutoff_idx = max(0, len(scoreable) - (len(scoreable) * percentile // 100))
-        return scoreable[:cutoff_idx]
+        cutoff = max(1, len(scoreable) * percentile // 100)
+        return scoreable[:cutoff]
     elif mode == "absolute":
         result = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
         result.sort(key=lambda p: float(p["eye_sharpness_min"]))
@@ -285,7 +313,7 @@ def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
 
     result = []
     for group in groups:
-        if len(group) == 1:
+        if len(group) <= 1:
             result.append([group[0]["path"]])
         else:
             sorted_group = sorted(
