@@ -14,7 +14,7 @@ from threading import Lock
 import os
 
 from mcp.server.fastmcp import FastMCP, Image as MCPImage
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageOps
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
@@ -67,6 +67,7 @@ def get_thumbnail(path: str, size: int = 512, annotate_face: bool = True) -> MCP
     """Return a JPEG thumbnail with optional face/eye bounding boxes drawn."""
     from PIL import ImageDraw
     img = PILImage.open(path)
+    img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
     orig_w, orig_h = img.size
     img.thumbnail((size, size), PILImage.LANCZOS)

@@ -28,7 +28,7 @@ import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageOps
 import imagehash
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,30 @@ VISIBILITY_MIN = 0.5  # landmarks below this are treated as not visible
 # ---------------------------------------------------------------------------
 # CV helpers
 # ---------------------------------------------------------------------------
+
+def _load_bgr(path: Path):
+    """Load image with EXIF orientation applied, returned as BGR numpy array.
+
+    cv2.imread() ignores EXIF orientation. Loading via Pillow + exif_transpose
+    ensures MediaPipe sees the correct upright orientation before face detection.
+    Returns None if the file cannot be read or converted.
+    """
+    try:
+        img = PILImage.open(path)
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    except (FileNotFoundError, PermissionError) as e:
+        raise type(e)(f"_load_bgr: file access error [{path.name}]: {e}")
+    except (OSError, PILImage.DecompressionBombError) as e:
+        # OSError covers UnidentifiedImageError and general I/O / corrupt-file errors.
+        # DecompressionBombError fires on images exceeding Pillow's size limit.
+        raise type(e)(f"_load_bgr: image read error [{path.name}]: {e}")
+    except cv2.error as e:
+        raise cv2.error(f"_load_bgr: OpenCV conversion error [{path.name}]: {e}")
+    except (ValueError, MemoryError) as e:
+        raise type(e)(f"_load_bgr: array/memory error [{path.name}]: {e}")
+
 
 def _laplacian_var(gray: np.ndarray) -> float:
     """
@@ -253,10 +277,14 @@ def compute_phash(path: Path) -> str:
     """
     try:
         img = PILImage.open(path)
-        h = imagehash.phash(img)
-        return str(h)
-    except Exception as e:
-        return None
+        img = ImageOps.exif_transpose(img)
+        return str(imagehash.phash(img))
+    except (FileNotFoundError, PermissionError) as e:
+        raise type(e)(f"compute_phash: file access error [{path.name}]: {e}")
+    except (OSError, PILImage.DecompressionBombError) as e:
+        raise type(e)(f"compute_phash: image read error [{path.name}]: {e}")
+    except (ValueError, MemoryError) as e:
+        raise type(e)(f"compute_phash: array/memory error [{path.name}]: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +314,16 @@ def score_image(path: Path, detector) -> dict | None:
                              aperture, focal_length, camera, taken_at}
              or None if file is unreadable
     """
-    bgr = cv2.imread(str(path))
-    if bgr is None:
-        return None
+    try:
+        bgr = _load_bgr(path)
+    except (FileNotFoundError, PermissionError) as e:
+        raise type(e)(f"score_image: file access error [{path.name}]: {e}")
+    except (OSError, PILImage.DecompressionBombError) as e:
+        raise type(e)(f"score_image: image read error [{path.name}]: {e}")
+    except cv2.error as e:
+        raise cv2.error(f"score_image: OpenCV error [{path.name}]: {e}")
+    except (ValueError, MemoryError) as e:
+        raise type(e)(f"score_image: array/memory error [{path.name}]: {e}")
 
     img_h, img_w = bgr.shape[:2]
     wi_sharp = whole_image_sharpness(bgr)
@@ -388,7 +423,16 @@ def score_batch(paths_batch: list[Path], detector) -> list[dict | None]:
     """
     results = []
     for path in paths_batch:
-        row = score_image(path, detector)
+        try:
+            row = score_image(path, detector)
+        except (FileNotFoundError, PermissionError) as e:
+            raise type(e)(f"score_batch: file access error [{path.name}]: {e}")
+        except (OSError, PILImage.DecompressionBombError) as e:
+            raise type(e)(f"score_batch: image read error [{path.name}]: {e}")
+        except cv2.error as e:
+            raise cv2.error(f"score_batch: OpenCV error [{path.name}]: {e}")
+        except (ValueError, MemoryError) as e:
+            raise type(e)(f"score_batch: array/memory error [{path.name}]: {e}")
         results.append(row)
     return results
 
@@ -499,12 +543,15 @@ def main(folder: str, output_csv: str = "scores.csv", model: str = MODEL_FILENAM
                 print(f"\r[{i:>4}/{len(jpgs)}] {path.name:<55}", end="", flush=True)
                 try:
                     row = score_image(path, detector)
-                    if row is None:
-                        errors.append(f"unreadable: {path}")
-                    else:
-                        writer.writerow(row)
-                except Exception as exc:
-                    errors.append(f"{path.name}: {exc}")
+                    writer.writerow(row)
+                except (FileNotFoundError, PermissionError) as exc:
+                    errors.append(f"file access error [{path.name}]: {exc}")
+                except (OSError, PILImage.DecompressionBombError) as exc:
+                    errors.append(f"image read error [{path.name}]: {exc}")
+                except cv2.error as exc:
+                    errors.append(f"OpenCV error [{path.name}]: {exc}")
+                except (ValueError, MemoryError) as exc:
+                    errors.append(f"array/memory error [{path.name}]: {exc}")
 
     scored = len(jpgs) - len(errors)
     print(f"\nDone. {scored}/{len(jpgs)} rows written → {output_csv}")

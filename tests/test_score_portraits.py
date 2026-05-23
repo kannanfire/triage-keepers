@@ -127,14 +127,15 @@ def test_score_image_no_face():
 
 
 def test_score_image_unreadable(tmp_path):
-    # cv2.imread returns None for corrupt or non-image files.
-    # score_image must return None (not raise) so the main loop can log and continue
-    # without crashing the entire indexing run.
+    # score_image raises OSError (PIL.UnidentifiedImageError) for corrupt/non-image files.
+    # Callers (score_batch, main) catch and log; the exception propagates to keep
+    # error messages explicit rather than silently returning None.
+    import pytest
     bad = tmp_path / "not_an_image.jpg"
     bad.write_text("garbage")
     detector = _make_detector()
-    result = score_image(bad, detector)
-    assert result is None
+    with pytest.raises(OSError):
+        score_image(bad, detector)
 
 
 def test_score_image_whole_sharpness_present():
