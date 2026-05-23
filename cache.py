@@ -156,7 +156,8 @@ def group_by_phash(photos: list[dict], hamming_threshold: int = 5) -> list[list[
             seed_phash = phash_photos[curr_idx]["phash"]
 
             for other_idx in list(ungrouped):
-                if other_idx == curr_idx:
+                # if other_idx == curr_idx:
+                if other_idx in group_indices:
                     continue
                 other_phash = phash_photos[other_idx]["phash"]
                 if hamming_distance(seed_phash, other_phash) <= hamming_threshold:
