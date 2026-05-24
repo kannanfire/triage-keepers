@@ -7,4 +7,5 @@ dependencies = [
     "opencv-python-headless>=4.9.0",
     "Pillow>=10.3.0",
     "mcp>=1.0.0",
+    "pytest>=8.0",
 ]
