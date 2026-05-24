@@ -145,7 +145,7 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
     batch_size = max(1, len(to_score) // (max_workers * 2))
     batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
 
-    all_rows = []
+    # all_rows = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -157,20 +157,30 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
             future = executor.submit(score_batch, batch_paths, detector)
             futures.append((future, batch))  # Keep batch for mtime/size pairing
 
+        # SQLite update occurs ffor every row
+        #
+        #
+
         for future, batch in futures:
             batch_results = future.result()
-            # Pair results with mtime/size
+            # Pair results with mtime/size,
+            batch_set_rows = []
             for row, (_, mtime, size) in zip(batch_results, batch):
                 if row is not None:
                     row["mtime"] = mtime
                     row["size"] = size
-                    all_rows.append(row)
+                    batch_set_rows.append(row)
 
-    # Batch-write to SQLite (main thread holds lock for all writes)
-    with _db_lock:
-        for row in all_rows:
-            _cache.upsert_photo(conn, row)
-            indexed += 1
+            with _db_lock:
+                for row in batch_set_rows:
+                    _cache.upsert_photo(conn, row)
+                    indexed += 1
+
+    # Batch-write to SQLite (main thread holds lock for all writes) - Invalid now
+    # with _db_lock:
+    #     for row in all_rows:
+    #         _cache.upsert_photo(conn, row)
+    #         indexed += 1
 
     return {"total": len(jpgs), "indexed": indexed, "skipped": skipped}
 
