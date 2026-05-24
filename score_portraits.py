@@ -370,7 +370,7 @@ FIELDNAMES = [
     "eye_sharpness_min", "eye_sharpness_max",
     "whole_image_sharpness", "fallback_used",
     "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
-    "phash",
+    "phash", "face_bboxes", "eye_bboxes",
 ]
 
 
@@ -426,7 +426,8 @@ def score_photos_parallel(folder: str, max_workers: int = 4) -> list[dict]:
 
     all_results = []
     detector_options = mp_vision.FaceLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=str(Path(MODEL_FILENAME))),
+        # base_options=mp_python.BaseOptions(model_asset_path=str(Path(MODEL_FILENAME))),
+        base_options=mp_python.BaseOptions(model_asset_path=str(Path(__file__).parent / MODEL_FILENAME)),
         running_mode=mp_vision.RunningMode.IMAGE,
         num_faces=10,
         min_face_detection_confidence=0.5,
