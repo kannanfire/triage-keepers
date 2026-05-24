@@ -244,7 +244,7 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     photos = _cache.get_photos_in_folder(conn, folder)
 
     if mode == "relative":
-        scoreable = [p for p in photos if p.get("fallback_used") is False and p.get("eye_sharpness_min")]
+        scoreable = [p for p in photos if not p.get("fallback_used") and p.get("eye_sharpness_min")]
         if not scoreable:
             return []
         scoreable.sort(key=lambda p: float(p["eye_sharpness_min"]))
