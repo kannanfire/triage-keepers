@@ -437,7 +437,7 @@ def score_batch(paths_batch: list[Path], detector) -> list[dict | None]:
     return results
 
 
-def score_photos_parallel(folder: str, max_workers: int = 4) -> list[dict]:
+def score_photos_parallel(folder: str, max_workers: int = 2) -> list[dict]:
     """
     Score all JPGs in folder using thread pool (one detector per thread).
 

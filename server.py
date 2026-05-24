@@ -23,7 +23,7 @@ from score_portraits import score_image, score_batch
 
 mcp = FastMCP("triage-keepers")
 
-_DB_PATH = Path("~/.triage-keepers/cache.db")
+_DB_PATH = Path("~/Documents/coding/photography_code/triage-keepers/cache.db")
 _MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
 _conn = None
 _detector = None
@@ -118,7 +118,11 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
         return {"error": f"Not a directory: {path}"}
 
     glob = p.rglob("*") if recursive else p.glob("*")
-    jpgs = [f for f in glob if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file()]
+    # jpgs = [f for f in glob if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file()]
+    jpgs = []
+    for f in glob:
+        if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file() and f.name[0] != '.':
+            jpgs.append(f)
 
     conn = _get_conn()
 
@@ -137,7 +141,7 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
 
     # Batch scoring with ThreadPoolExecutor
     # max_workers = max_workers or os.cpu_count() or 4
-    max_workers = 2
+    max_workers = 1
     batch_size = max(1, len(to_score) // (max_workers * 2))
     batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
 
