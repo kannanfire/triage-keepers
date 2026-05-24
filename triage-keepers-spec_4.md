@@ -202,6 +202,34 @@ The vision-confirmation pattern is the most differentiated piece. It's a real pr
 
 ---
 
+## Threading
+
+After evening 7 
+
+Key Threading Improvements
+
+  1. Parallelized CV Scoring (Lines 109–133 in server.py)
+  - ThreadPoolExecutor distributes batches of photos across worker threads
+  - Batch size: max(1, len(to_score) // (max_workers * 2)) — ensures at least 2 batches per worker for better load balancing
+  - Default max_workers = os.cpu_count() or 4 — scales to available cores
+  
+  2. One Detector Per Worker Thread
+  - Line 122: Each batch submission creates a fresh MediaPipe detector instance (_get_detector())
+  - Avoids thread-safety issues in MediaPipe's IMAGE mode (no shared mutable state across threads)
+  - Each worker scores its assigned photos independently
+  
+  3. Batch-Write with SQLite Lock (Lines 135–139)
+  - Main thread collects all results from futures (lines 126–133)
+  - Critical: Hold _db_lock for entire batch write (lines 136–139)
+  - SQLite is thread-safe but serializes under contention; batching upserts eliminates per-photo lock contention
+  - Reduces write synchronization from 10,000+ individual lock acquisitions to 1 batch (for ~10K photos)
+  
+  4. Cache Invalidation (Pre-Filtering, Lines 96–101)
+  - Main thread checks needs_reindex() on mtime/size (DB reads are fast)
+  - Filters to only photos needing CV work before submitting to workers
+  - Unchanged photos skip both scoring and database writes entirely
+
+
 ## Stack
 
 | Component | Library | Confidence |

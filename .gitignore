@@ -3,11 +3,13 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+.gitignore
+
 triage-keepers-plan.md
 .DS_Store
 temp/
 untitled folder/
-
+temp2/
 
 # C extensions
 *.so
