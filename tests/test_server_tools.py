@@ -348,3 +348,39 @@ def test_get_pair_recursive_finds_in_subdirs(tmp_path):
     assert result["status"] == "paired"
     assert result["jpg"] is not None
     assert result["raw"] is not None
+
+
+# ---------------------------------------------------------------------------
+# assess_subject_sharpness tests
+# ---------------------------------------------------------------------------
+
+def test_assess_subject_sharpness_caches_on_second_call(jpg_dir):
+    """
+    assess_subject_sharpness must cache mtime/size to avoid infinite re-scoring.
+
+    First call: cache miss, scores the photo, stores mtime+size in cache.
+    Second call: cache hit, returns from cache without re-scoring.
+
+    Without mtime/size (prior bug), needs_reindex would always return True,
+    causing every call to re-score even unchanged files.
+
+    Expected output: second call completes faster (returns from cache, skips CV).
+    """
+    import time
+    from server import assess_subject_sharpness
+
+    test_jpg = jpg_dir / "photo_00.jpg"
+
+    start = time.time()
+    result1 = assess_subject_sharpness(str(test_jpg))
+    elapsed1 = time.time() - start
+
+    start = time.time()
+    result2 = assess_subject_sharpness(str(test_jpg))
+    elapsed2 = time.time() - start
+
+    assert result1["face_count"] == 0  # sharp.jpg has no faces
+    assert result2["face_count"] == 0
+    # Second call should be much faster (cache hit, no CV)
+    # On a single 64x64 pixel image, CV takes ~0.1s; cache hit takes ~0.01s
+    assert elapsed2 < elapsed1 * 0.5  # second call is at most half as slow

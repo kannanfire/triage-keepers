@@ -203,9 +203,14 @@ def assess_subject_sharpness(path: str) -> dict:
     if row is None:
         detector = _get_detector()
         from pathlib import Path as PathClass
-        row = score_image(PathClass(path), detector)
+        file_path = PathClass(path)
+        row = score_image(file_path, detector)
         if row is not None:
-            _cache.upsert_photo(conn, row)
+            stat = file_path.stat()
+            row["mtime"] = stat.st_mtime
+            row["size"] = stat.st_size
+            with _db_lock:
+                _cache.upsert_photo(conn, row)
 
     if row is None:
         return {"error": f"Could not score: {path}"}
