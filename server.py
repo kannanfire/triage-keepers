@@ -398,7 +398,7 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
 
 
 @mcp.tool()
-def get_pair(basename: str, folder: str) -> dict:
+def get_pair(basename: str, folder: str, recursive: bool = True) -> dict:
     """
     Find RAW + JPG pairing for a photo.
 
@@ -408,6 +408,7 @@ def get_pair(basename: str, folder: str) -> dict:
 
     basename: filename with extension (e.g. "IMG_7102.JPG")
     folder: folder to search (should contain both JPG and RAW files)
+    recursive: search subdirectories (default True)
     Returns: dict with jpg, raw, status (one of "paired", "jpg_only", "raw_only"),
              jpg_size, raw_size
     """
@@ -417,8 +418,9 @@ def get_pair(basename: str, folder: str) -> dict:
     jpg_path = None
     raw_path = None
 
-    for f in folder_path.iterdir():
-        if f.stem.upper() == name_stem.upper():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if f.is_file() and f.stem.upper() == name_stem.upper():
             if f.suffix.upper() in {".JPG", ".JPEG"}:
                 jpg_path = f
             elif f.suffix.upper() in {".CR2", ".NEF", ".ARW", ".RW2", ".DNG"}:
@@ -447,7 +449,7 @@ def get_pair(basename: str, folder: str) -> dict:
 
 
 @mcp.tool()
-def find_orphans(folder: str) -> dict:
+def find_orphans(folder: str, recursive: bool = True) -> dict:
     """
     Find unpaired RAW and JPG files in folder.
 
@@ -455,6 +457,7 @@ def find_orphans(folder: str) -> dict:
     JPGs without RAWs: shot in JPG-only mode, or RAW deleted/moved.
 
     folder: folder path to scan
+    recursive: search subdirectories (default True)
     Returns: dict with raw_orphans (list of RAW paths) and jpg_orphans
              (list of JPG paths with no RAW sibling)
     """
@@ -466,7 +469,10 @@ def find_orphans(folder: str) -> dict:
     stems_with_jpg = set()
     stems_with_raw = set()
 
-    for f in folder_path.iterdir():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if not f.is_file():
+            continue
         if f.suffix.upper() in jpg_extensions:
             stems_with_jpg.add(f.stem.upper())
         elif f.suffix.upper() in raw_extensions:
@@ -475,7 +481,10 @@ def find_orphans(folder: str) -> dict:
     raw_orphans = []
     jpg_orphans = []
 
-    for f in folder_path.iterdir():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if not f.is_file():
+            continue
         stem = f.stem.upper()
         if f.suffix.upper() in raw_extensions and stem not in stems_with_jpg:
             raw_orphans.append(str(f))

@@ -256,3 +256,95 @@ def test_get_thumbnail_respects_size():
 
     assert img.width <= 32
     assert img.height <= 32
+
+
+# ---------------------------------------------------------------------------
+# find_orphans tests
+# ---------------------------------------------------------------------------
+
+def test_find_orphans_finds_unpaired_files(tmp_path):
+    """
+    find_orphans must detect RAW files without JPG pairs and vice versa.
+
+    Creates paired (IMG_001.JPG + IMG_001.CR2) and orphan (IMG_002.JPG alone)
+    files, then confirms the orphan is found in jpg_orphans list.
+
+    Expected output: jpg_orphans contains IMG_002.JPG, jpg_count == 1.
+    """
+    from server import find_orphans
+
+    (tmp_path / "IMG_001.JPG").write_text("jpg")
+    (tmp_path / "IMG_001.CR2").write_text("raw")
+    (tmp_path / "IMG_002.JPG").write_text("jpg")
+
+    result = find_orphans(str(tmp_path), recursive=False)
+    assert result["jpg_count"] == 1
+    assert any("IMG_002.JPG" in path for path in result["jpg_orphans"])
+
+
+def test_find_orphans_recursive_finds_in_subdirs(tmp_path):
+    """
+    find_orphans with recursive=True must find orphans in subdirectories.
+
+    Creates nested structure: subdir/IMG_001.JPG (orphan), subdir/IMG_002.JPG (paired with CR2).
+    Confirms orphan is found even though it's not in the root folder.
+
+    Expected output: jpg_orphans contains subdir/IMG_001.JPG.
+    """
+    from server import find_orphans
+
+    subdir = tmp_path / "2024"
+    subdir.mkdir()
+    (subdir / "IMG_001.JPG").write_text("jpg")
+    (subdir / "IMG_002.JPG").write_text("jpg")
+    (subdir / "IMG_002.CR2").write_text("raw")
+
+    result = find_orphans(str(tmp_path), recursive=True)
+    assert result["jpg_count"] == 1
+    assert any("IMG_001.JPG" in path for path in result["jpg_orphans"])
+
+
+# ---------------------------------------------------------------------------
+# get_pair tests
+# ---------------------------------------------------------------------------
+
+def test_get_pair_finds_pairing(tmp_path):
+    """
+    get_pair must locate both JPG and RAW files with matching basenames.
+
+    Creates IMG_001.JPG and IMG_001.CR2, then queries for IMG_001.JPG.
+    Confirms status == "paired" and both paths are returned.
+
+    Expected output: status == "paired", jpg and raw both not None.
+    """
+    from server import get_pair
+
+    (tmp_path / "IMG_001.JPG").write_text("jpg")
+    (tmp_path / "IMG_001.CR2").write_text("raw")
+
+    result = get_pair("IMG_001.JPG", str(tmp_path))
+    assert result["status"] == "paired"
+    assert result["jpg"] is not None
+    assert result["raw"] is not None
+
+
+def test_get_pair_recursive_finds_in_subdirs(tmp_path):
+    """
+    get_pair with recursive=True must find paired files in subdirectories.
+
+    Creates subdir/IMG_001.JPG and subdir/IMG_001.CR2, then queries from root folder.
+    Confirms status == "paired" even though files are nested.
+
+    Expected output: status == "paired" when recursive=True.
+    """
+    from server import get_pair
+
+    subdir = tmp_path / "2024"
+    subdir.mkdir()
+    (subdir / "IMG_001.JPG").write_text("jpg")
+    (subdir / "IMG_001.CR2").write_text("raw")
+
+    result = get_pair("IMG_001.JPG", str(tmp_path), recursive=True)
+    assert result["status"] == "paired"
+    assert result["jpg"] is not None
+    assert result["raw"] is not None
