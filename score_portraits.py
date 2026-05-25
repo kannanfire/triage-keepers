@@ -341,7 +341,7 @@ def score_image(path: Path, detector) -> dict | None:
     }
 
     if n_faces == 0:
-        cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+        cv_scores = {"eye_sharpness_min": None, "eye_sharpness_max": None, "fallback_used": True}
         face_bboxes = []
         eye_bboxes = []
     else:
@@ -368,7 +368,7 @@ def score_image(path: Path, detector) -> dict | None:
             eye_bboxes.append(per_face_eyes)
 
         if not scores:
-            cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+            cv_scores = {"eye_sharpness_min": None, "eye_sharpness_max": None, "fallback_used": True}
         else:
             cv_scores = {
                 "eye_sharpness_min": round(min(scores), 4),
