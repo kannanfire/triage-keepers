@@ -384,3 +384,86 @@ def test_assess_subject_sharpness_caches_on_second_call(jpg_dir):
     # Second call should be much faster (cache hit, no CV)
     # On a single 64x64 pixel image, CV takes ~0.1s; cache hit takes ~0.01s
     assert elapsed2 < elapsed1 * 0.5  # second call is at most half as slow
+
+
+# ---------------------------------------------------------------------------
+# find_no_subject tests
+# ---------------------------------------------------------------------------
+
+def test_find_no_subject_with_limit(jpg_dir):
+    """
+    find_no_subject must respect limit parameter and not return all rows.
+
+    Indexes 3 photos (all no-face), then queries with limit=1.
+    Confirms only 1 result is returned despite 3 photos in cache.
+
+    Expected output: results list has length 1, count == 3.
+    """
+    from server import index_folder, find_no_subject
+
+    index_folder(str(jpg_dir))
+    result = find_no_subject(str(jpg_dir), limit=1)
+
+    assert result["count"] == 3
+    assert len(result["results"]) == 1
+
+
+def test_find_no_subject_count_only(jpg_dir):
+    """
+    find_no_subject with count_only=True must return only count and folder.
+
+    Indexes 3 photos, then queries with count_only=True.
+    Confirms response has no "results" key (no row payload).
+
+    Expected output: dict with "count" and "folder", no "results" key.
+    """
+    from server import index_folder, find_no_subject
+
+    index_folder(str(jpg_dir))
+    result = find_no_subject(str(jpg_dir), count_only=True)
+
+    assert result["count"] == 3
+    assert result["folder"] == str(jpg_dir)
+    assert "results" not in result
+
+
+# ---------------------------------------------------------------------------
+# find_unsharp_subjects tests
+# ---------------------------------------------------------------------------
+
+def test_find_unsharp_subjects_with_limit(jpg_dir):
+    """
+    find_unsharp_subjects must respect limit parameter.
+
+    Indexes 3 photos (all unscoreable faces = fallback_used=True, no eye sharpness).
+    Queries relative mode with limit=1.
+    Confirms only 1 result despite 3 photos in cache.
+
+    Expected output: results list has max length 1.
+    """
+    from server import index_folder, find_unsharp_subjects
+
+    index_folder(str(jpg_dir))
+    result = find_unsharp_subjects(str(jpg_dir), limit=1)
+
+    assert "results" in result
+    assert len(result["results"]) <= 1
+
+
+def test_find_unsharp_subjects_count_only(jpg_dir):
+    """
+    find_unsharp_subjects with count_only=True must return only count and folder.
+
+    Indexes 3 photos, then queries with count_only=True.
+    Confirms response has no "results" key.
+
+    Expected output: dict with "count" and "folder", no "results" key.
+    """
+    from server import index_folder, find_unsharp_subjects
+
+    index_folder(str(jpg_dir))
+    result = find_unsharp_subjects(str(jpg_dir), count_only=True)
+
+    assert "count" in result
+    assert result["folder"] == str(jpg_dir)
+    assert "results" not in result

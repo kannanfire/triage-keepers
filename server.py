@@ -229,7 +229,7 @@ def assess_subject_sharpness(path: str) -> dict:
 
 
 @mcp.tool()
-def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10) -> list[dict]:
+def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10, limit: int = 50, count_only: bool = False) -> dict:
     """
     Find photos in folder below sharpness threshold.
 
@@ -243,7 +243,9 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     folder: folder path to scan
     mode: "relative" or "absolute"
     percentile: used only in relative mode (default 10 = bottom decile)
-    Returns: list of dicts, sorted by sharpness ascending
+    limit: max rows returned (default 50). Ignored if count_only=True.
+    count_only: when True, return {"count": N, "folder": folder} only (default False)
+    Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
     photos = _cache.get_photos_in_folder(conn, folder)
@@ -251,20 +253,23 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     if mode == "relative":
         scoreable = [p for p in photos if not p.get("fallback_used") and p.get("eye_sharpness_min")]
         if not scoreable:
-            return []
+            return {"count": 0, "folder": folder} if count_only else {"count": 0, "folder": folder, "results": []}
         scoreable.sort(key=lambda p: float(p["eye_sharpness_min"]))
         cutoff = max(1, len(scoreable) * percentile // 100)
-        return scoreable[:cutoff]
+        result_set = scoreable[:cutoff]
     elif mode == "absolute":
-        result = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
-        result.sort(key=lambda p: float(p["eye_sharpness_min"]))
-        return result
+        result_set = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
+        result_set.sort(key=lambda p: float(p["eye_sharpness_min"]))
     else:
         return {"error": f"Unknown mode: {mode}"}
 
+    if count_only:
+        return {"count": len(result_set), "folder": folder}
+    return {"count": len(result_set), "folder": folder, "results": result_set[:limit]}
+
 
 @mcp.tool()
-def find_no_subject(folder: str) -> list[dict]:
+def find_no_subject(folder: str, limit: int = 50, count_only: bool = False) -> dict:
     """
     Find photos where face detection failed (face_count == 0).
 
@@ -274,14 +279,19 @@ def find_no_subject(folder: str) -> list[dict]:
     Sorted by whole_image_sharpness ascending (sharpest first).
 
     folder: folder path to scan
-    Returns: list of dicts with face_count=0, sorted by whole_image_sharpness ascending
+    limit: max rows returned (default 50). Ignored if count_only=True.
+    count_only: when True, return {"count": N, "folder": folder} only (default False)
+    Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
     photos = _cache.get_photos_in_folder(conn, folder)
 
     no_face = [p for p in photos if p.get("face_count") == 0]
     no_face.sort(key=lambda p: float(p.get("whole_image_sharpness", 999)))
-    return no_face
+
+    if count_only:
+        return {"count": len(no_face), "folder": folder}
+    return {"count": len(no_face), "folder": folder, "results": no_face[:limit]}
 
 
 @mcp.tool()
