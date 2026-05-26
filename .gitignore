@@ -224,3 +224,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# triage-keepers specific
+cache.db
+*.csv
+2026-*-command-message*.txt
+.idea/
