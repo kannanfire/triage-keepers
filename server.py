@@ -126,12 +126,13 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
             jpgs.append(f)
 
     conn = _get_conn()
+    library_root = str(p)  # Root folder for this index operation
 
     # Filter to photos needing reindex (main thread checks DB)
     to_score = []
     for f in jpgs:
         stat = f.stat()
-        if _cache.needs_reindex(conn, str(f), stat.st_mtime, stat.st_size):
+        if _cache.needs_reindex(conn, str(f), stat.st_mtime, stat.st_size, library_root=library_root):
             to_score.append((f, stat.st_mtime, stat.st_size))
 
     skipped = len(jpgs) - len(to_score)
@@ -167,7 +168,7 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
 
             with _db_lock:
                 for row in batch_set_rows:
-                    _cache.upsert_photo(conn, row)
+                    _cache.upsert_photo(conn, row, library_root=library_root)
                     indexed += 1
 
     return {"total": len(jpgs), "indexed": indexed, "skipped": skipped}
@@ -186,18 +187,19 @@ def assess_subject_sharpness(path: str) -> dict:
              whole_image_sharpness, fallback_used, camera, taken_at, phash
     """
     conn = _get_conn()
-    row = _cache.get_photo(conn, path)
+    file_path = Path(path).resolve()
+    library_root = str(file_path.parent)  # Infer library_root as parent directory
+    row = _cache.get_photo(conn, path, library_root=library_root)
 
     if row is None:
         detector = _get_detector()
-        file_path = Path(path)
         row = score_image(file_path, detector)
         if row is not None:
             stat = file_path.stat()
             row["mtime"] = stat.st_mtime
             row["size"] = stat.st_size
             with _db_lock:
-                _cache.upsert_photo(conn, row)
+                _cache.upsert_photo(conn, row, library_root=library_root)
 
     if row is None:
         return {"error": f"Could not score: {path}"}
@@ -235,7 +237,7 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder)
+    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
 
     if mode == "relative":
         scoreable = [p for p in photos if not p.get("fallback_used") and p.get("eye_sharpness_min")]
@@ -271,7 +273,7 @@ def find_no_subject(folder: str, limit: int = 50, count_only: bool = False) -> d
     Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder)
+    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
 
     no_face = [p for p in photos if p.get("face_count") == 0]
     no_face.sort(key=lambda p: float(p.get("whole_image_sharpness", 999)))
@@ -323,7 +325,7 @@ def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 
              eye_sharpness_min descending (sharpest candidates first)
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder)
+    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
 
     if not photos:
         return []
@@ -519,7 +521,7 @@ def summarize_folder(folder: str) -> dict:
     """
     import statistics
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder)
+    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
 
     if not photos:
         return {"total": 0, "error": "No indexed photos in folder. Run index_folder first."}
