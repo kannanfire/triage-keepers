@@ -250,8 +250,8 @@ def extract_exif(path: Path) -> dict:
             if 36867 in exif_ifd:
                 exif_dict["taken_at"] = str(exif_ifd[36867])
 
-    except Exception as e:
-        pass
+    except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
+        print(f"extract_exif failed for {path.name}: {e}", file=sys.stderr)
 
     return exif_dict
 
