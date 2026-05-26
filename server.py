@@ -316,11 +316,12 @@ def get_metadata(path: str) -> dict:
 
 
 @mcp.tool()
-def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
+def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 60) -> list[list[str]]:
     """
     Find groups of near-duplicate photos (bursts) via pHash clustering.
 
-    Groups photos by perceptual hash (Hamming distance <= hamming threshold).
+    Groups photos by perceptual hash (Hamming distance <= hamming threshold)
+    and optionally by shot time (taken_at within time_window_seconds).
     Each group represents a sequence of frames shot in rapid succession with
     nearly identical composition.
 
@@ -329,7 +330,8 @@ def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
     repeat until all grouped.
 
     folder: folder path to scan
-    hamming: max Hamming distance to group (default 5; typical burst threshold)
+    hamming: max Hamming distance to group (default 3; tighter than old 5 to avoid mega-clusters)
+    time_window_seconds: max seconds between photos in same group (default 60). Set to 0 to disable.
     Returns: list of groups, each group is list of file paths, sorted by
              eye_sharpness_min descending (sharpest candidates first)
     """
@@ -339,7 +341,7 @@ def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
     if not photos:
         return []
 
-    groups = _cache.group_by_phash(photos, hamming)
+    groups = _cache.group_by_phash(photos, hamming, time_window_seconds if time_window_seconds > 0 else None)
 
     result = []
     for group in groups:
