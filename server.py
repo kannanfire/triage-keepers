@@ -120,7 +120,6 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
         return {"error": f"Not a directory: {path}"}
 
     glob = p.rglob("*") if recursive else p.glob("*")
-    # jpgs = [f for f in glob if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file()]
     jpgs = []
     for f in glob:
         if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file() and f.name[0] != '.':
@@ -146,8 +145,6 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
     batch_size = max(1, len(to_score) // (max_workers * 2))
     batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
 
-    # all_rows = []
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for batch in batches:
@@ -157,10 +154,6 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
             detector = _get_detector()
             future = executor.submit(score_batch, batch_paths, detector)
             futures.append((future, batch))  # Keep batch for mtime/size pairing
-
-        # SQLite update occurs ffor every row
-        #
-        #
 
         for future, batch in futures:
             batch_results = future.result()
@@ -176,12 +169,6 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
                 for row in batch_set_rows:
                     _cache.upsert_photo(conn, row)
                     indexed += 1
-
-    # Batch-write to SQLite (main thread holds lock for all writes) - Invalid now
-    # with _db_lock:
-    #     for row in all_rows:
-    #         _cache.upsert_photo(conn, row)
-    #         indexed += 1
 
     return {"total": len(jpgs), "indexed": indexed, "skipped": skipped}
 
@@ -203,8 +190,7 @@ def assess_subject_sharpness(path: str) -> dict:
 
     if row is None:
         detector = _get_detector()
-        from pathlib import Path as PathClass
-        file_path = PathClass(path)
+        file_path = Path(path)
         row = score_image(file_path, detector)
         if row is not None:
             stat = file_path.stat()
