@@ -111,6 +111,8 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
     batches to workers, and batch-writes results to SQLite with _db_lock to
     avoid serialization.
 
+    max_workers: thread pool size. Default 1 (HDD-safe). Can be overridden by
+                 TRIAGE_MAX_WORKERS environment variable or explicit parameter.
     Returns dict: {"total": count, "indexed": count, "skipped": count}
     """
     p = Path(path).expanduser().resolve()
@@ -140,8 +142,7 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
         return {"total": len(jpgs), "indexed": 0, "skipped": skipped}
 
     # Batch scoring with ThreadPoolExecutor
-    # max_workers = max_workers or os.cpu_count() or 4
-    max_workers = 1
+    max_workers = max_workers or int(os.environ.get("TRIAGE_MAX_WORKERS", "1"))
     batch_size = max(1, len(to_score) // (max_workers * 2))
     batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
 
