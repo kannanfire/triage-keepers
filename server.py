@@ -23,7 +23,7 @@ from score_portraits import score_image, score_batch
 
 mcp = FastMCP("triage-keepers")
 
-_DB_PATH = Path("~/.triage-keepers/cache.db")
+_DB_PATH = Path("~/Documents/coding/photography_code/triage-keepers/cache.db")
 _MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
 _conn = None
 _detector = None
@@ -111,6 +111,8 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
     batches to workers, and batch-writes results to SQLite with _db_lock to
     avoid serialization.
 
+    max_workers: thread pool size. Default 1 (HDD-safe). Can be overridden by
+                 TRIAGE_MAX_WORKERS environment variable or explicit parameter.
     Returns dict: {"total": count, "indexed": count, "skipped": count}
     """
     p = Path(path).expanduser().resolve()
@@ -118,7 +120,10 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
         return {"error": f"Not a directory: {path}"}
 
     glob = p.rglob("*") if recursive else p.glob("*")
-    jpgs = [f for f in glob if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file()]
+    jpgs = []
+    for f in glob:
+        if f.suffix.lower() in {".jpg", ".jpeg"} and f.is_file() and f.name[0] != '.':
+            jpgs.append(f)
 
     conn = _get_conn()
 
@@ -136,12 +141,9 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
         return {"total": len(jpgs), "indexed": 0, "skipped": skipped}
 
     # Batch scoring with ThreadPoolExecutor
-    # max_workers = max_workers or os.cpu_count() or 4
-    max_workers = 2
+    max_workers = max_workers or int(os.environ.get("TRIAGE_MAX_WORKERS", "1"))
     batch_size = max(1, len(to_score) // (max_workers * 2))
     batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
-
-    all_rows = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -155,18 +157,18 @@ def index_folder(path: str, recursive: bool = True, max_workers: int = None) -> 
 
         for future, batch in futures:
             batch_results = future.result()
-            # Pair results with mtime/size
+            # Pair results with mtime/size,
+            batch_set_rows = []
             for row, (_, mtime, size) in zip(batch_results, batch):
                 if row is not None:
                     row["mtime"] = mtime
                     row["size"] = size
-                    all_rows.append(row)
+                    batch_set_rows.append(row)
 
-    # Batch-write to SQLite (main thread holds lock for all writes)
-    with _db_lock:
-        for row in all_rows:
-            _cache.upsert_photo(conn, row)
-            indexed += 1
+            with _db_lock:
+                for row in batch_set_rows:
+                    _cache.upsert_photo(conn, row)
+                    indexed += 1
 
     return {"total": len(jpgs), "indexed": indexed, "skipped": skipped}
 
@@ -188,10 +190,14 @@ def assess_subject_sharpness(path: str) -> dict:
 
     if row is None:
         detector = _get_detector()
-        from pathlib import Path as PathClass
-        row = score_image(PathClass(path), detector)
+        file_path = Path(path)
+        row = score_image(file_path, detector)
         if row is not None:
-            _cache.upsert_photo(conn, row)
+            stat = file_path.stat()
+            row["mtime"] = stat.st_mtime
+            row["size"] = stat.st_size
+            with _db_lock:
+                _cache.upsert_photo(conn, row)
 
     if row is None:
         return {"error": f"Could not score: {path}"}
@@ -210,7 +216,7 @@ def assess_subject_sharpness(path: str) -> dict:
 
 
 @mcp.tool()
-def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10) -> list[dict]:
+def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10, limit: int = 50, count_only: bool = False) -> dict:
     """
     Find photos in folder below sharpness threshold.
 
@@ -224,28 +230,33 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     folder: folder path to scan
     mode: "relative" or "absolute"
     percentile: used only in relative mode (default 10 = bottom decile)
-    Returns: list of dicts, sorted by sharpness ascending
+    limit: max rows returned (default 50). Ignored if count_only=True.
+    count_only: when True, return {"count": N, "folder": folder} only (default False)
+    Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
     photos = _cache.get_photos_in_folder(conn, folder)
 
     if mode == "relative":
-        scoreable = [p for p in photos if p.get("fallback_used") is False and p.get("eye_sharpness_min")]
+        scoreable = [p for p in photos if not p.get("fallback_used") and p.get("eye_sharpness_min")]
         if not scoreable:
-            return []
+            return {"count": 0, "folder": folder} if count_only else {"count": 0, "folder": folder, "results": []}
         scoreable.sort(key=lambda p: float(p["eye_sharpness_min"]))
         cutoff = max(1, len(scoreable) * percentile // 100)
-        return scoreable[:cutoff]
+        result_set = scoreable[:cutoff]
     elif mode == "absolute":
-        result = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
-        result.sort(key=lambda p: float(p["eye_sharpness_min"]))
-        return result
+        result_set = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
+        result_set.sort(key=lambda p: float(p["eye_sharpness_min"]))
     else:
         return {"error": f"Unknown mode: {mode}"}
 
+    if count_only:
+        return {"count": len(result_set), "folder": folder}
+    return {"count": len(result_set), "folder": folder, "results": result_set[:limit]}
+
 
 @mcp.tool()
-def find_no_subject(folder: str) -> list[dict]:
+def find_no_subject(folder: str, limit: int = 50, count_only: bool = False) -> dict:
     """
     Find photos where face detection failed (face_count == 0).
 
@@ -255,14 +266,19 @@ def find_no_subject(folder: str) -> list[dict]:
     Sorted by whole_image_sharpness ascending (sharpest first).
 
     folder: folder path to scan
-    Returns: list of dicts with face_count=0, sorted by whole_image_sharpness ascending
+    limit: max rows returned (default 50). Ignored if count_only=True.
+    count_only: when True, return {"count": N, "folder": folder} only (default False)
+    Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
     photos = _cache.get_photos_in_folder(conn, folder)
 
     no_face = [p for p in photos if p.get("face_count") == 0]
     no_face.sort(key=lambda p: float(p.get("whole_image_sharpness", 999)))
-    return no_face
+
+    if count_only:
+        return {"count": len(no_face), "folder": folder}
+    return {"count": len(no_face), "folder": folder, "results": no_face[:limit]}
 
 
 @mcp.tool()
@@ -287,11 +303,12 @@ def get_metadata(path: str) -> dict:
 
 
 @mcp.tool()
-def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
+def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 60) -> list[list[str]]:
     """
     Find groups of near-duplicate photos (bursts) via pHash clustering.
 
-    Groups photos by perceptual hash (Hamming distance <= hamming threshold).
+    Groups photos by perceptual hash (Hamming distance <= hamming threshold)
+    and optionally by shot time (taken_at within time_window_seconds).
     Each group represents a sequence of frames shot in rapid succession with
     nearly identical composition.
 
@@ -300,7 +317,8 @@ def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
     repeat until all grouped.
 
     folder: folder path to scan
-    hamming: max Hamming distance to group (default 5; typical burst threshold)
+    hamming: max Hamming distance to group (default 3; tighter than old 5 to avoid mega-clusters)
+    time_window_seconds: max seconds between photos in same group (default 60). Set to 0 to disable.
     Returns: list of groups, each group is list of file paths, sorted by
              eye_sharpness_min descending (sharpest candidates first)
     """
@@ -310,7 +328,7 @@ def find_burst_groups(folder: str, hamming: int = 5) -> list[list[str]]:
     if not photos:
         return []
 
-    groups = _cache.group_by_phash(photos, hamming)
+    groups = _cache.group_by_phash(photos, hamming, time_window_seconds if time_window_seconds > 0 else None)
 
     result = []
     for group in groups:
@@ -384,7 +402,7 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
 
 
 @mcp.tool()
-def get_pair(basename: str, folder: str) -> dict:
+def get_pair(basename: str, folder: str, recursive: bool = True) -> dict:
     """
     Find RAW + JPG pairing for a photo.
 
@@ -394,6 +412,7 @@ def get_pair(basename: str, folder: str) -> dict:
 
     basename: filename with extension (e.g. "IMG_7102.JPG")
     folder: folder to search (should contain both JPG and RAW files)
+    recursive: search subdirectories (default True)
     Returns: dict with jpg, raw, status (one of "paired", "jpg_only", "raw_only"),
              jpg_size, raw_size
     """
@@ -403,8 +422,9 @@ def get_pair(basename: str, folder: str) -> dict:
     jpg_path = None
     raw_path = None
 
-    for f in folder_path.iterdir():
-        if f.stem.upper() == name_stem.upper():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if f.is_file() and f.stem.upper() == name_stem.upper():
             if f.suffix.upper() in {".JPG", ".JPEG"}:
                 jpg_path = f
             elif f.suffix.upper() in {".CR2", ".NEF", ".ARW", ".RW2", ".DNG"}:
@@ -433,7 +453,7 @@ def get_pair(basename: str, folder: str) -> dict:
 
 
 @mcp.tool()
-def find_orphans(folder: str) -> dict:
+def find_orphans(folder: str, recursive: bool = True) -> dict:
     """
     Find unpaired RAW and JPG files in folder.
 
@@ -441,6 +461,7 @@ def find_orphans(folder: str) -> dict:
     JPGs without RAWs: shot in JPG-only mode, or RAW deleted/moved.
 
     folder: folder path to scan
+    recursive: search subdirectories (default True)
     Returns: dict with raw_orphans (list of RAW paths) and jpg_orphans
              (list of JPG paths with no RAW sibling)
     """
@@ -452,7 +473,10 @@ def find_orphans(folder: str) -> dict:
     stems_with_jpg = set()
     stems_with_raw = set()
 
-    for f in folder_path.iterdir():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if not f.is_file():
+            continue
         if f.suffix.upper() in jpg_extensions:
             stems_with_jpg.add(f.stem.upper())
         elif f.suffix.upper() in raw_extensions:
@@ -461,7 +485,10 @@ def find_orphans(folder: str) -> dict:
     raw_orphans = []
     jpg_orphans = []
 
-    for f in folder_path.iterdir():
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if not f.is_file():
+            continue
         stem = f.stem.upper()
         if f.suffix.upper() in raw_extensions and stem not in stems_with_jpg:
             raw_orphans.append(str(f))

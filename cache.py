@@ -125,15 +125,18 @@ def hamming_distance(hash1: str, hash2: str) -> int:
         return 999
 
 
-def group_by_phash(photos: list[dict], hamming_threshold: int = 5) -> list[list[dict]]:
+def group_by_phash(photos: list[dict], hamming_threshold: int = 5, time_window_seconds: int = None) -> list[list[dict]]:
     """
     Group photos by pHash similarity (Hamming distance <= threshold).
 
     Greedy clustering: start with first ungrouped photo, find all photos
     within hamming_threshold of it (directly or transitively), form group.
+    Optionally constrain by taken_at timestamp.
 
     photos: list of photo dicts from cache
     hamming_threshold: max Hamming distance to group (default 5)
+    time_window_seconds: optional max seconds between taken_at timestamps.
+                         Photos without taken_at fall back to pHash-only grouping.
     Returns: list of groups, each group is list of photo dicts
     """
     if not photos:
@@ -143,6 +146,23 @@ def group_by_phash(photos: list[dict], hamming_threshold: int = 5) -> list[list[
     if not phash_photos:
         return []
 
+    def parse_timestamp(taken_at_str):
+        """Parse EXIF timestamp 'YYYY:MM:DD HH:MM:SS' to seconds since epoch."""
+        if not taken_at_str:
+            return None
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(taken_at_str, "%Y:%m:%d %H:%M:%S")
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            return None
+
+    def within_time_window(ts1, ts2, window_seconds):
+        """Check if two timestamps are within window_seconds of each other."""
+        if ts1 is None or ts2 is None:
+            return True  # Missing timestamp falls back to pHash-only
+        return abs(ts1 - ts2) <= window_seconds
+
     groups = []
     ungrouped = set(range(len(phash_photos)))
 
@@ -150,17 +170,25 @@ def group_by_phash(photos: list[dict], hamming_threshold: int = 5) -> list[list[
         seed_idx = min(ungrouped)
         group_indices = {seed_idx}
         queue = [seed_idx]
+        seed_timestamp = parse_timestamp(phash_photos[seed_idx].get("taken_at")) if time_window_seconds else None
 
         while queue:
             curr_idx = queue.pop(0)
-            seed_phash = phash_photos[curr_idx]["phash"]
+            curr_phash = phash_photos[curr_idx]["phash"]
+            curr_timestamp = parse_timestamp(phash_photos[curr_idx].get("taken_at")) if time_window_seconds else None
 
             for other_idx in list(ungrouped):
-                # if other_idx == curr_idx:
                 if other_idx in group_indices:
                     continue
                 other_phash = phash_photos[other_idx]["phash"]
-                if hamming_distance(seed_phash, other_phash) <= hamming_threshold:
+                other_timestamp = parse_timestamp(phash_photos[other_idx].get("taken_at")) if time_window_seconds else None
+
+                hamming_match = hamming_distance(curr_phash, other_phash) <= hamming_threshold
+                time_match = True
+                if time_window_seconds is not None:
+                    time_match = within_time_window(curr_timestamp, other_timestamp, time_window_seconds)
+
+                if hamming_match and time_match:
                     group_indices.add(other_idx)
                     queue.append(other_idx)
 

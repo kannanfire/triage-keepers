@@ -115,15 +115,15 @@ def test_score_image_no_face():
     # When face detection returns no landmarks, score_image must:
     #   1. Set face_count=0
     #   2. Set fallback_used=True (signals to agent this photo needs manual review)
-    #   3. Leave eye_sharpness_min and eye_sharpness_max empty (not scoreable)
+    #   3. Leave eye_sharpness_min and eye_sharpness_max as None (not scoreable)
     # This is the expected path for environmental shots, backs-of-heads, etc.
     detector = _make_detector(face_landmarks=[])
     row = score_image(FIXTURES / "sharp.jpg", detector)
     assert row is not None
     assert row["face_count"] == 0
     assert row["fallback_used"] is True
-    assert row["eye_sharpness_min"] == ""
-    assert row["eye_sharpness_max"] == ""
+    assert row["eye_sharpness_min"] is None
+    assert row["eye_sharpness_max"] is None
 
 
 def test_score_image_unreadable(tmp_path):

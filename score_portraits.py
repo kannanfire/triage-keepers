@@ -218,25 +218,27 @@ def extract_exif(path: Path) -> dict:
         exif = img.getexif()
 
         if exif:
-            if 34855 in exif:
-                exif_dict["iso"] = int(exif[34855])
+            exif_ifd = exif.get_ifd(0x8769)  # ExifIFD sub-block; ISO/shutter/aperture/focal/datetime live here
 
-            if 33434 in exif:
-                frac = exif[33434]
+            if 34855 in exif_ifd:
+                exif_dict["iso"] = int(exif_ifd[34855])
+
+            if 33434 in exif_ifd:
+                frac = exif_ifd[33434]
                 if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
                     exif_dict["shutter"] = f"{frac.numerator}/{frac.denominator}"
                 else:
                     exif_dict["shutter"] = str(frac)
 
-            if 33437 in exif:
-                frac = exif[33437]
+            if 33437 in exif_ifd:
+                frac = exif_ifd[33437]
                 if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
                     exif_dict["aperture"] = float(frac.numerator) / float(frac.denominator)
                 else:
                     exif_dict["aperture"] = float(frac)
 
-            if 37386 in exif:
-                frac = exif[37386]
+            if 37386 in exif_ifd:
+                frac = exif_ifd[37386]
                 if hasattr(frac, 'numerator') and hasattr(frac, 'denominator'):
                     exif_dict["focal_length"] = float(frac.numerator) / float(frac.denominator)
                 else:
@@ -245,12 +247,11 @@ def extract_exif(path: Path) -> dict:
             if 271 in exif:
                 exif_dict["camera"] = str(exif[271]).strip()
 
-            if 36867 in exif:
-                dt_str = str(exif[36867])
-                exif_dict["taken_at"] = dt_str
+            if 36867 in exif_ifd:
+                exif_dict["taken_at"] = str(exif_ifd[36867])
 
-    except Exception as e:
-        pass
+    except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
+        print(f"extract_exif failed for {path.name}: {e}", file=sys.stderr)
 
     return exif_dict
 
@@ -340,7 +341,7 @@ def score_image(path: Path, detector) -> dict | None:
     }
 
     if n_faces == 0:
-        cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+        cv_scores = {"eye_sharpness_min": None, "eye_sharpness_max": None, "fallback_used": True}
         face_bboxes = []
         eye_bboxes = []
     else:
@@ -367,7 +368,7 @@ def score_image(path: Path, detector) -> dict | None:
             eye_bboxes.append(per_face_eyes)
 
         if not scores:
-            cv_scores = {"eye_sharpness_min": "", "eye_sharpness_max": "", "fallback_used": True}
+            cv_scores = {"eye_sharpness_min": None, "eye_sharpness_max": None, "fallback_used": True}
         else:
             cv_scores = {
                 "eye_sharpness_min": round(min(scores), 4),
@@ -437,7 +438,7 @@ def score_batch(paths_batch: list[Path], detector) -> list[dict | None]:
     return results
 
 
-def score_photos_parallel(folder: str, max_workers: int = 4) -> list[dict]:
+def score_photos_parallel(folder: str, max_workers: int = 2) -> list[dict]:
     """
     Score all JPGs in folder using thread pool (one detector per thread).
 
