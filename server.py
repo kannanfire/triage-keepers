@@ -335,14 +335,16 @@ def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 
     result = []
     for group in groups:
         if len(group) <= 1:
-            result.append([group[0]["path"]])
+            photo = group[0]
+            full_path = str(Path(photo["library_root"]) / photo["rel_path"])
+            result.append([full_path])
         else:
             sorted_group = sorted(
                 group,
                 key=lambda p: float(p.get("eye_sharpness_min", 0)) if p.get("eye_sharpness_min") else 0,
                 reverse=True
             )
-            result.append([p["path"] for p in sorted_group])
+            result.append([str(Path(p["library_root"]) / p["rel_path"]) for p in sorted_group])
 
     return result
 
@@ -364,7 +366,8 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
     conn = _get_conn()
     photos = []
     for path in file_paths:
-        row = _cache.get_photo(conn, path)
+        lib_root = str(Path(path).parent)
+        row = _cache.get_photo(conn, path, library_root=lib_root)
         if row:
             photos.append(row)
 
@@ -382,8 +385,9 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
 
     result = []
     for p in photos:
+        full_path = str(Path(p.get("library_root")) / p.get("rel_path")) if p.get("library_root") and p.get("rel_path") else None
         result.append({
-            "path": p.get("path"),
+            "path": full_path,
             "face_count": p.get("face_count"),
             "eye_sharpness_min": p.get("eye_sharpness_min"),
             "eye_sharpness_max": p.get("eye_sharpness_max"),
@@ -474,27 +478,33 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
 
     stems_with_jpg = set()
     stems_with_raw = set()
-
-    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
-    for f in files:
-        if not f.is_file():
-            continue
-        if f.suffix.upper() in jpg_extensions:
-            stems_with_jpg.add(f.stem.upper())
-        elif f.suffix.upper() in raw_extensions:
-            stems_with_raw.add(f.stem.upper())
-
     raw_orphans = []
     jpg_orphans = []
 
+    # Single pass: build stems and collect orphans simultaneously
     files = folder_path.rglob("*") if recursive else folder_path.iterdir()
     for f in files:
         if not f.is_file():
             continue
         stem = f.stem.upper()
-        if f.suffix.upper() in raw_extensions and stem not in stems_with_jpg:
+        suffix = f.suffix.upper()
+
+        if suffix in jpg_extensions:
+            stems_with_jpg.add(stem)
+        elif suffix in raw_extensions:
+            stems_with_raw.add(stem)
+
+    # Second pass: identify orphans based on collected stems
+    files = folder_path.rglob("*") if recursive else folder_path.iterdir()
+    for f in files:
+        if not f.is_file():
+            continue
+        stem = f.stem.upper()
+        suffix = f.suffix.upper()
+
+        if suffix in raw_extensions and stem not in stems_with_jpg:
             raw_orphans.append(str(f))
-        elif f.suffix.upper() in jpg_extensions and stem not in stems_with_raw:
+        elif suffix in jpg_extensions and stem not in stems_with_raw:
             jpg_orphans.append(str(f))
 
     return {
