@@ -237,7 +237,7 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
+    photos = _cache.get_photos_in_folder(conn, folder)
 
     if mode == "relative":
         scoreable = [p for p in photos if not p.get("fallback_used") and p.get("eye_sharpness_min")]
@@ -273,7 +273,7 @@ def find_no_subject(folder: str, limit: int = 50, count_only: bool = False) -> d
     Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
+    photos = _cache.get_photos_in_folder(conn, folder)
 
     no_face = [p for p in photos if p.get("face_count") == 0]
     no_face.sort(key=lambda p: float(p.get("whole_image_sharpness", 999)))
@@ -325,7 +325,7 @@ def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 
              eye_sharpness_min descending (sharpest candidates first)
     """
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
+    photos = _cache.get_photos_in_folder(conn, folder)
 
     if not photos:
         return []
@@ -366,8 +366,7 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
     conn = _get_conn()
     photos = []
     for path in file_paths:
-        lib_root = str(Path(path).parent)
-        row = _cache.get_photo(conn, path, library_root=lib_root)
+        row = _cache.get_photo_by_abspath(conn, path)
         if row:
             photos.append(row)
 
@@ -375,7 +374,11 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
         return []
 
     photos.sort(
-        key=lambda p: float(p.get("eye_sharpness_min", 0)) if p.get("eye_sharpness_min") else 0,
+        key=lambda p: (
+            float(p["eye_sharpness_min"]) if p.get("eye_sharpness_min") is not None
+            else float(p["whole_image_sharpness"]) if p.get("whole_image_sharpness") is not None
+            else 0.0
+        ),
         reverse=True
     )
 
@@ -468,10 +471,12 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
 
     folder: folder path to scan
     recursive: search subdirectories (default True)
-    Returns: dict with raw_orphans (list of RAW paths) and jpg_orphans
-             (list of JPG paths with no RAW sibling)
+    Returns: dict with raw_orphans, jpg_orphans, counts, and diagnostics
     """
     folder_path = Path(folder).resolve()
+
+    if not folder_path.exists():
+        return {"error": f"Folder not found: {folder}"}
 
     raw_extensions = {".CR2", ".NEF", ".ARW", ".RW2", ".DNG"}
     jpg_extensions = {".JPG", ".JPEG"}
@@ -480,12 +485,17 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
     stems_with_raw = set()
     raw_orphans = []
     jpg_orphans = []
+    files_scanned = 0
 
-    # Single pass: build stems and collect orphans simultaneously
+    # First pass: build stems
     files = folder_path.rglob("*") if recursive else folder_path.iterdir()
     for f in files:
+        # Skip hidden path components (e.g., .Spotlight-V100, .Trashes)
+        if any(p.startswith('.') for p in f.relative_to(folder_path).parts):
+            continue
         if not f.is_file():
             continue
+        files_scanned += 1
         stem = f.stem.upper()
         suffix = f.suffix.upper()
 
@@ -497,6 +507,9 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
     # Second pass: identify orphans based on collected stems
     files = folder_path.rglob("*") if recursive else folder_path.iterdir()
     for f in files:
+        # Skip hidden path components (same guard as first pass)
+        if any(p.startswith('.') for p in f.relative_to(folder_path).parts):
+            continue
         if not f.is_file():
             continue
         stem = f.stem.upper()
@@ -512,6 +525,8 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
         "jpg_orphans": sorted(jpg_orphans),
         "raw_count": len(raw_orphans),
         "jpg_count": len(jpg_orphans),
+        "files_scanned": files_scanned,
+        "folder_accessible": True,
     }
 
 
@@ -531,7 +546,7 @@ def summarize_folder(folder: str) -> dict:
     """
     import statistics
     conn = _get_conn()
-    photos = _cache.get_photos_in_folder(conn, folder, library_root=str(Path(folder).resolve()))
+    photos = _cache.get_photos_in_folder(conn, folder)
 
     if not photos:
         return {"total": 0, "error": "No indexed photos in folder. Run index_folder first."}

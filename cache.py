@@ -31,6 +31,13 @@ _COLUMNS = [
     "camera", "taken_at", "indexed_at",
 ]
 
+_FOLDER_COLS = [
+    "library_root", "rel_path",
+    "face_count", "eye_sharpness_min", "eye_sharpness_max",
+    "whole_image_sharpness", "fallback_used",
+    "phash", "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
+]
+
 
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     db_path = Path(db_path).expanduser()
@@ -161,33 +168,58 @@ def get_photo(conn: sqlite3.Connection, path: str, library_root: str | Path = No
         return None
 
 
+def get_photo_by_abspath(conn: sqlite3.Connection, path: str) -> dict | None:
+    """
+    Retrieve one photo record by absolute path (full-path match).
+
+    Queries using reconstructed full path (library_root || '/' || rel_path).
+    Use this when library_root is unknown but the absolute path is available.
+
+    path: absolute file path
+    Returns: dict with all columns, or None if not in cache
+    """
+    try:
+        abs_path = str(Path(path).resolve())
+        row = conn.execute(
+            "SELECT * FROM photos WHERE library_root || '/' || rel_path = ?",
+            (abs_path,)
+        ).fetchone()
+        if row is None:
+            return None
+        cols = _COLUMNS
+        return dict(zip(cols, row))
+    except Exception as e:
+        print(f"get_photo_by_abspath error for {path}: {e}", file=sys.stderr)
+        return None
+
+
 def get_photos_in_folder(conn: sqlite3.Connection, folder: str, library_root: str | Path = None) -> list[dict]:
     """
     Retrieve all photos cached under a folder path (recursive).
 
+    Supports both exact-match (indexed at this folder) and parent-folder queries
+    (for summarize_folder on parent of indexed folders).
+
     folder: folder path to query
-    library_root: optional folder root. If not provided, uses folder as root.
+    library_root: deprecated, ignored. Kept for backward compatibility.
     Returns: list of dicts, one per photo under folder
     """
     try:
-        if library_root is None:
-            library_root = folder
-
-        library_root = str(Path(library_root).resolve())
         folder_path = Path(folder).resolve()
+        folder_str = str(folder_path)
 
-        # Find all photos under folder within the same library_root
+        # Query all library_roots that match the folder exactly or are subdirectories
+        cols_str = ", ".join(_FOLDER_COLS)
         rows = conn.execute(
-            "SELECT * FROM photos WHERE library_root = ? ORDER BY rel_path",
-            (library_root,)
+            f"SELECT {cols_str} FROM photos WHERE library_root = ? OR library_root LIKE ? || '/%' ORDER BY library_root, rel_path",
+            (folder_str, folder_str)
         ).fetchall()
 
-        cols = _COLUMNS
         result = []
         for row in rows:
             try:
-                photo_dict = dict(zip(cols, row))
-                # Reconstruct full path and check if it's under folder
+                photo_dict = dict(zip(_FOLDER_COLS, row))
+                # Reconstruct full path and check if it's under folder (secondary guard)
                 full_path = Path(photo_dict["library_root"]) / photo_dict["rel_path"]
                 if str(full_path).startswith(str(folder_path)):
                     result.append(photo_dict)
@@ -201,15 +233,16 @@ def get_photos_in_folder(conn: sqlite3.Connection, folder: str, library_root: st
         return []
 
 
-def get_all_photos(conn: sqlite3.Connection) -> list[dict]:
-    """
-    Retrieve all cached photos (unfiltered).
-
-    Returns: list of dicts, one per photo
-    """
-    rows = conn.execute("SELECT * FROM photos ORDER BY path").fetchall()
-    cols = _COLUMNS
-    return [dict(zip(cols, row)) for row in rows]
+# DEPRECATED: get_all_photos had ORDER BY path which doesn't exist in P11 schema.
+# def get_all_photos(conn: sqlite3.Connection) -> list[dict]:
+#     """
+#     Retrieve all cached photos (unfiltered).
+#
+#     Returns: list of dicts, one per photo
+#     """
+#     rows = conn.execute("SELECT * FROM photos ORDER BY path").fetchall()
+#     cols = _COLUMNS
+#     return [dict(zip(cols, row)) for row in rows]
 
 
 def hamming_distance(hash1: str, hash2: str) -> int:
