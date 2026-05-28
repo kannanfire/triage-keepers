@@ -216,12 +216,15 @@ def get_photos_in_folder(conn: sqlite3.Connection, folder: str, library_root: st
         ).fetchall()
 
         result = []
+        seen_paths = set()
         for row in rows:
             try:
                 photo_dict = dict(zip(_FOLDER_COLS, row))
                 # Reconstruct full path and check if it's under folder (secondary guard)
                 full_path = Path(photo_dict["library_root"]) / photo_dict["rel_path"]
-                if str(full_path).startswith(str(folder_path)):
+                full_path_str = str(full_path)
+                if full_path_str.startswith(str(folder_path)) and full_path_str not in seen_paths:
+                    seen_paths.add(full_path_str)
                     result.append(photo_dict)
             except Exception as e:
                 print(f"get_photos_in_folder: error processing row: {e}", file=sys.stderr)

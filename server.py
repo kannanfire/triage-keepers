@@ -54,12 +54,16 @@ def _get_detector():
 
 
 @mcp.tool()
-def list_folders(root: str) -> list[str]:
-    """Return immediate subdirectories of root, sorted."""
+def list_folders(root: str) -> dict:
+    """Return immediate subdirectories of root, sorted.
+
+    Returns: dict with "folders" list of paths and "folder_count"
+    """
     p = Path(root).expanduser().resolve()
     if not p.is_dir():
-        return []
-    return [str(d) for d in sorted(p.iterdir()) if d.is_dir()]
+        return {"folders": [], "folder_count": 0}
+    folders = [str(d) for d in sorted(p.iterdir()) if d.is_dir()]
+    return {"folders": folders, "folder_count": len(folders)}
 
 
 @mcp.tool()
@@ -188,8 +192,7 @@ def assess_subject_sharpness(path: str) -> dict:
     """
     conn = _get_conn()
     file_path = Path(path).resolve()
-    library_root = str(file_path.parent)  # Infer library_root as parent directory
-    row = _cache.get_photo(conn, path, library_root=library_root)
+    row = _cache.get_photo_by_abspath(conn, path)
 
     if row is None:
         detector = _get_detector()
@@ -198,14 +201,20 @@ def assess_subject_sharpness(path: str) -> dict:
             stat = file_path.stat()
             row["mtime"] = stat.st_mtime
             row["size"] = stat.st_size
+            library_root = str(file_path.parent)
             with _db_lock:
                 _cache.upsert_photo(conn, row, library_root=library_root)
 
     if row is None:
         return {"error": f"Could not score: {path}"}
 
+    full_path = (
+        row.get("path") or
+        (str(Path(row.get("library_root", "")) / row.get("rel_path", "")) if row.get("library_root") and row.get("rel_path") else str(file_path))
+    )
+
     return {
-        "path": row.get("path"),
+        "path": full_path,
         "face_count": row.get("face_count"),
         "eye_sharpness_min": row.get("eye_sharpness_min"),
         "eye_sharpness_max": row.get("eye_sharpness_max"),
@@ -305,7 +314,7 @@ def get_metadata(path: str) -> dict:
 
 
 @mcp.tool()
-def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 60) -> list[list[str]]:
+def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 60) -> dict:
     """
     Find groups of near-duplicate photos (bursts) via pHash clustering.
 
@@ -321,14 +330,14 @@ def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 
     folder: folder path to scan
     hamming: max Hamming distance to group (default 3; tighter than old 5 to avoid mega-clusters)
     time_window_seconds: max seconds between photos in same group (default 60). Set to 0 to disable.
-    Returns: list of groups, each group is list of file paths, sorted by
-             eye_sharpness_min descending (sharpest candidates first)
+    Returns: dict with "groups" (list of groups, each group is list of paths, sorted by
+             eye_sharpness_min descending) and "group_count"
     """
     conn = _get_conn()
     photos = _cache.get_photos_in_folder(conn, folder)
 
     if not photos:
-        return []
+        return {"groups": [], "group_count": 0}
 
     groups = _cache.group_by_phash(photos, hamming, time_window_seconds if time_window_seconds > 0 else None)
 
@@ -346,22 +355,21 @@ def find_burst_groups(folder: str, hamming: int = 3, time_window_seconds: int = 
             )
             result.append([str(Path(p["library_root"]) / p["rel_path"]) for p in sorted_group])
 
-    return result
+    return {"groups": result, "group_count": len(result)}
 
 
 @mcp.tool()
-def rank_burst_group(file_paths: list[str]) -> list[dict]:
+def rank_burst_group(file_paths: list[str]) -> dict:
     """
-    Rank photos within a burst group by eye sharpness and surface EXIF deltas.
+    Rank photos within a burst group by tier (face-detected first) then sharpness.
 
-    Takes a group of near-duplicates (from find_burst_groups) and ranks by
-    eye_sharpness_min (highest first). Also computes ISO/shutter/aperture
-    deltas to show exposure bracketing or camera adjustments.
+    Takes a group of near-duplicates (from find_burst_groups) and ranks by:
+    1. Face detection tier (face-detected photos rank before fallback)
+    2. Sharpness score (eye_sharpness_min for face, whole_image_sharpness for fallback)
+    Also computes ISO/shutter/aperture deltas to show exposure bracketing.
 
     file_paths: list of absolute paths to JPGs in one burst group
-    Returns: list of dicts, sorted by eye_sharpness_min descending, with
-             fields: path, face_count, eye_sharpness_min, eye_sharpness_max,
-             fallback_used, iso, shutter, aperture, exif_deltas
+    Returns: dict with "ranked" (list of ranked photo dicts) and "photo_count"
     """
     conn = _get_conn()
     photos = []
@@ -371,10 +379,11 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
             photos.append(row)
 
     if not photos:
-        return []
+        return {"ranked": [], "photo_count": 0}
 
     photos.sort(
         key=lambda p: (
+            1 if p.get("eye_sharpness_min") is not None else 0,
             float(p["eye_sharpness_min"]) if p.get("eye_sharpness_min") is not None
             else float(p["whole_image_sharpness"]) if p.get("whole_image_sharpness") is not None
             else 0.0
@@ -407,7 +416,7 @@ def rank_burst_group(file_paths: list[str]) -> list[dict]:
             }
         })
 
-    return result
+    return {"ranked": result, "photo_count": len(result)}
 
 
 @mcp.tool()
@@ -487,37 +496,40 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
     jpg_orphans = []
     files_scanned = 0
 
-    # First pass: build stems
+    # First pass: build stems with parent directory context to limit pairing to same directory
     files = folder_path.rglob("*") if recursive else folder_path.iterdir()
     for f in files:
-        # Skip hidden path components (e.g., .Spotlight-V100, .Trashes)
-        if any(p.startswith('.') for p in f.relative_to(folder_path).parts):
+        # Skip hidden files (name starts with .)
+        if f.name.startswith('.'):
             continue
         if not f.is_file():
             continue
         files_scanned += 1
         stem = f.stem.upper()
         suffix = f.suffix.upper()
+        parent_dir = str(f.parent)
 
         if suffix in jpg_extensions:
-            stems_with_jpg.add(stem)
+            stems_with_jpg.add((parent_dir, stem))
         elif suffix in raw_extensions:
-            stems_with_raw.add(stem)
+            stems_with_raw.add((parent_dir, stem))
 
     # Second pass: identify orphans based on collected stems
     files = folder_path.rglob("*") if recursive else folder_path.iterdir()
     for f in files:
-        # Skip hidden path components (same guard as first pass)
-        if any(p.startswith('.') for p in f.relative_to(folder_path).parts):
+        # Skip hidden files (same guard as first pass)
+        if f.name.startswith('.'):
             continue
         if not f.is_file():
             continue
         stem = f.stem.upper()
         suffix = f.suffix.upper()
+        parent_dir = str(f.parent)
+        key = (parent_dir, stem)
 
-        if suffix in raw_extensions and stem not in stems_with_jpg:
+        if suffix in raw_extensions and key not in stems_with_jpg:
             raw_orphans.append(str(f))
-        elif suffix in jpg_extensions and stem not in stems_with_raw:
+        elif suffix in jpg_extensions and key not in stems_with_raw:
             jpg_orphans.append(str(f))
 
     return {

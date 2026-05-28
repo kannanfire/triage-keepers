@@ -92,7 +92,7 @@ def test_list_folders_returns_subdirs(tmp_path):
 
     from server import list_folders
     result = list_folders(str(tmp_path))
-    names = [Path(p).name for p in result]
+    names = [Path(p).name for p in result["folders"]]
 
     assert "aaa" in names
     assert "zzz" in names
@@ -115,7 +115,7 @@ def test_list_folders_sorted(tmp_path):
 
     from server import list_folders
     result = list_folders(str(tmp_path))
-    names = [Path(p).name for p in result]
+    names = [Path(p).name for p in result["folders"]]
 
     assert names == sorted(names)
 
@@ -132,7 +132,7 @@ def test_list_folders_bad_path():
     """
     from server import list_folders
     result = list_folders("/this/does/not/exist/anywhere")
-    assert result == []
+    assert result == {"folders": [], "folder_count": 0}
 
 
 # ---------------------------------------------------------------------------
