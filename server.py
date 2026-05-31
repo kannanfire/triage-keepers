@@ -208,10 +208,7 @@ def assess_subject_sharpness(path: str) -> dict:
     if row is None:
         return {"error": f"Could not score: {path}"}
 
-    full_path = (
-        row.get("path") or
-        (str(Path(row.get("library_root", "")) / row.get("rel_path", "")) if row.get("library_root") and row.get("rel_path") else str(file_path))
-    )
+    full_path = str(Path(row.get("library_root", "")) / row.get("rel_path", "")) if row.get("library_root") and row.get("rel_path") else str(file_path)
 
     return {
         "path": full_path,
@@ -532,11 +529,19 @@ def find_orphans(folder: str, recursive: bool = True) -> dict:
         elif suffix in jpg_extensions and key not in stems_with_raw:
             jpg_orphans.append(str(f))
 
+    raw_total = len(stems_with_raw)
+    jpg_total = len(stems_with_jpg)
+    all_paired = len(raw_orphans) == 0 and len(jpg_orphans) == 0
+
     return {
-        "raw_orphans": sorted(raw_orphans),
-        "jpg_orphans": sorted(jpg_orphans),
         "raw_count": len(raw_orphans),
         "jpg_count": len(jpg_orphans),
+        "raw_total": raw_total,
+        "jpg_total": jpg_total,
+        "raw_orphans": sorted(raw_orphans),
+        "jpg_orphans": sorted(jpg_orphans),
+        "all_paired": all_paired,
+        "pairing_status": "All files properly paired" if all_paired else f"{len(raw_orphans)} RAW orphans, {len(jpg_orphans)} JPG orphans",
         "files_scanned": files_scanned,
         "folder_accessible": True,
     }
