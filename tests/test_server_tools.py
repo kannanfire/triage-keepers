@@ -354,6 +354,56 @@ def test_get_pair_recursive_finds_in_subdirs(tmp_path):
 # assess_subject_sharpness tests
 # ---------------------------------------------------------------------------
 
+def test_get_metadata_returns_cached_row(jpg_dir):
+    """
+    get_metadata must return full cached data for an indexed photo.
+
+    Regression guard: before the fix, get_metadata used get_photo() which
+    inferred library_root as the file's immediate parent, causing mismatches
+    when the photo was indexed under an ancestor directory.
+    """
+    from server import get_metadata, index_folder
+
+    index_folder(str(jpg_dir))
+    result = get_metadata(str(jpg_dir / "photo_00.jpg"))
+
+    assert "error" not in result
+    assert result["face_count"] == 0
+    assert result["whole_image_sharpness"] is not None
+
+
+def test_get_metadata_not_in_cache_returns_error(jpg_dir):
+    """
+    get_metadata must return an error dict for a path not in cache.
+
+    No indexing — photo exists on disk but has no cache entry.
+    """
+    from server import get_metadata
+
+    result = get_metadata(str(jpg_dir / "photo_00.jpg"))
+
+    assert "error" in result
+    assert "photo_00.jpg" in result["error"]
+
+
+def test_assess_subject_sharpness_returns_path(jpg_dir):
+    """
+    assess_subject_sharpness must return a non-null path field for cached photos.
+
+    P11 removed the 'path' column from the schema. Path is now reconstructed
+    from library_root + rel_path. Regression guard: before the fix,
+    row.get('path') returned None for all cached photos.
+    """
+    from server import assess_subject_sharpness, index_folder
+
+    index_folder(str(jpg_dir))
+    result = assess_subject_sharpness(str(jpg_dir / "photo_00.jpg"))
+
+    assert "error" not in result
+    assert result["path"] is not None
+    assert result["path"].endswith(".jpg")
+
+
 def test_assess_subject_sharpness_caches_on_second_call(jpg_dir):
     """
     assess_subject_sharpness must cache mtime/size to avoid infinite re-scoring.
@@ -384,6 +434,162 @@ def test_assess_subject_sharpness_caches_on_second_call(jpg_dir):
     # Second call should be much faster (cache hit, no CV)
     # On a single 64x64 pixel image, CV takes ~0.1s; cache hit takes ~0.01s
     assert elapsed2 < elapsed1 * 0.5  # second call is at most half as slow
+
+
+# ---------------------------------------------------------------------------
+# summarize_folder tests
+# ---------------------------------------------------------------------------
+
+def test_summarize_folder_basic_counts(jpg_dir):
+    """
+    summarize_folder must return correct totals after indexing.
+
+    Fixtures have no faces, so face_detected=0 and no_face_count equals total.
+    """
+    from server import summarize_folder, index_folder
+
+    index_folder(str(jpg_dir))
+    result = summarize_folder(str(jpg_dir))
+
+    assert "error" not in result
+    assert result["total"] == 3
+    assert result["face_detected"] == 0
+    assert result["no_face_count"] == 3
+
+
+def test_summarize_folder_unindexed_returns_error(tmp_path):
+    """
+    summarize_folder must return an error dict when no photos are indexed.
+    """
+    from server import summarize_folder
+
+    result = summarize_folder(str(tmp_path))
+
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# find_burst_groups tests
+# ---------------------------------------------------------------------------
+
+def test_find_burst_groups_empty_folder(tmp_path):
+    """
+    find_burst_groups must return empty result when no photos are indexed.
+    """
+    from server import find_burst_groups
+
+    result = find_burst_groups(str(tmp_path))
+
+    assert result == {"groups": [], "group_count": 0}
+
+
+def test_find_burst_groups_paths_are_absolute(jpg_dir):
+    """
+    Every path returned by find_burst_groups must be an absolute path.
+
+    Guards P11 path reconstruction (library_root / rel_path join).
+    Fixture photos have unique pHashes so each forms its own single-photo group.
+    """
+    from server import find_burst_groups, index_folder
+
+    index_folder(str(jpg_dir))
+    result = find_burst_groups(str(jpg_dir))
+
+    assert result["group_count"] > 0
+    for group in result["groups"]:
+        for path in group:
+            assert Path(path).is_absolute()
+            assert Path(path).exists()
+
+
+# ---------------------------------------------------------------------------
+# rank_burst_group tests
+# ---------------------------------------------------------------------------
+
+def test_rank_burst_group_result_structure(jpg_dir):
+    """
+    rank_burst_group must return photo_count, ranked list, and exif_deltas.
+    All paths in ranked must be absolute.
+    """
+    from server import rank_burst_group, index_folder
+
+    index_folder(str(jpg_dir))
+    paths = [str(p) for p in sorted(jpg_dir.glob("*.jpg"))]
+    result = rank_burst_group(paths)
+
+    assert result["photo_count"] == 3
+    assert len(result["ranked"]) == 3
+    for item in result["ranked"]:
+        assert Path(item["path"]).is_absolute()
+        assert "exif_deltas" in item
+
+
+def test_rank_burst_group_face_tier_before_fallback(tmp_path):
+    """
+    rank_burst_group must rank face-detected photos before fallback photos.
+
+    Two-tier sort: (1 if eye_sharpness_min is not None else 0, score).
+    A photo with eye_sharpness_min=50.0 must rank above one with eye_sharpness_min=None,
+    even if the fallback photo has a higher whole_image_sharpness.
+
+    Uses direct DB insertion to control sharpness values without running CV.
+    """
+    from server import rank_burst_group, _get_conn
+    from cache import upsert_photo
+
+    conn = _get_conn()
+    lib = str(tmp_path)
+
+    face_jpg = tmp_path / "face.jpg"
+    fallback_jpg = tmp_path / "fallback.jpg"
+    face_jpg.write_bytes(b"x")
+    fallback_jpg.write_bytes(b"x")
+
+    upsert_photo(conn, {
+        "path": str(face_jpg), "mtime": 1.0, "size": 1,
+        "face_count": 1, "eye_sharpness_min": 50.0, "eye_sharpness_max": 50.0,
+        "whole_image_sharpness": 10.0, "fallback_used": 0, "phash": "aabbccdd11223344",
+    }, library_root=lib)
+    upsert_photo(conn, {
+        "path": str(fallback_jpg), "mtime": 1.0, "size": 1,
+        "face_count": 0, "eye_sharpness_min": None, "eye_sharpness_max": None,
+        "whole_image_sharpness": 999.0, "fallback_used": 1, "phash": "aabbccdd11223355",
+    }, library_root=lib)
+
+    result = rank_burst_group([str(face_jpg), str(fallback_jpg)])
+
+    assert result["photo_count"] == 2
+    assert result["ranked"][0]["path"].endswith("face.jpg")
+    assert result["ranked"][1]["path"].endswith("fallback.jpg")
+
+
+def test_find_burst_groups_groups_identical_phashes(tmp_path):
+    """
+    find_burst_groups must group photos with identical pHashes together.
+
+    Injects 2 photos with the same pHash and 1 with a different pHash directly
+    into the DB, bypassing CV. Verifies the grouping logic without needing
+    real near-duplicate images.
+    """
+    from server import find_burst_groups, _get_conn
+    from cache import upsert_photo
+
+    conn = _get_conn()
+    lib = str(tmp_path)
+
+    for i, phash in enumerate(["aabbccdd11223344", "aabbccdd11223344", "ffffffffffffffff"]):
+        p = tmp_path / f"photo_{i:02d}.jpg"
+        p.write_bytes(b"x")
+        upsert_photo(conn, {
+            "path": str(p), "mtime": 1.0, "size": 1,
+            "face_count": 0, "phash": phash,
+        }, library_root=lib)
+
+    result = find_burst_groups(str(tmp_path), hamming=0)
+
+    assert result["group_count"] == 2
+    group_sizes = sorted(len(g) for g in result["groups"])
+    assert group_sizes == [1, 2]
 
 
 # ---------------------------------------------------------------------------

@@ -145,3 +145,37 @@ def test_score_image_whole_sharpness_present():
     detector = _make_detector(face_landmarks=[])
     row = score_image(FIXTURES / "sharp.jpg", detector)
     assert row["whole_image_sharpness"] > 0
+
+
+def test_compute_phash_returns_hex_string():
+    """
+    compute_phash must return a 16-character lowercase hex string.
+
+    pHash is a 64-bit value encoded as hex. Deterministic: same image
+    always returns the same hash.
+    """
+    import re
+    from score_portraits import compute_phash
+
+    result = compute_phash(FIXTURES / "sharp.jpg")
+
+    assert result is not None
+    assert re.match(r"^[0-9a-f]{16}$", result), f"Expected 16-char hex, got: {result!r}"
+    assert result == compute_phash(FIXTURES / "sharp.jpg")  # deterministic
+
+
+def test_extract_exif_returns_all_none_for_no_exif():
+    """
+    extract_exif must return all-None fields for JPEGs with no EXIF block.
+
+    The test fixtures are synthetic images with no EXIF. This verifies the
+    no-EXIF path returns a well-formed dict (not an exception or partial result).
+    """
+    from score_portraits import extract_exif
+
+    result = extract_exif(FIXTURES / "sharp.jpg")
+
+    assert isinstance(result, dict)
+    for key in ("iso", "shutter", "aperture", "focal_length", "camera", "taken_at"):
+        assert key in result
+        assert result[key] is None, f"Expected None for {key}, got {result[key]!r}"
