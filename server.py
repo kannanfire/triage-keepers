@@ -302,7 +302,7 @@ def get_metadata(path: str) -> dict:
     Returns: dict with all cached columns, or error dict if not in cache
     """
     conn = _get_conn()
-    row = _cache.get_photo(conn, path)
+    row = _cache.get_photo_by_abspath(conn, path)
 
     if row is None:
         return {"error": f"Not in cache: {path}"}
