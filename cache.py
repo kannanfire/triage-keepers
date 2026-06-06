@@ -1,10 +1,12 @@
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS photos (
-  path TEXT PRIMARY KEY,
+  library_root TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
   mtime REAL, size INTEGER,
   face_count INTEGER,
   eye_sharpness_min REAL,
@@ -15,17 +17,25 @@ CREATE TABLE IF NOT EXISTS photos (
   face_bboxes TEXT,
   eye_bboxes TEXT,
   iso INTEGER, shutter TEXT, aperture REAL, focal_length REAL,
-  camera TEXT, taken_at TEXT, indexed_at TEXT
+  camera TEXT, taken_at TEXT, indexed_at TEXT,
+  PRIMARY KEY (library_root, rel_path)
 );
-CREATE INDEX IF NOT EXISTS idx_photos_dir ON photos(path);
+CREATE INDEX IF NOT EXISTS idx_photos_dir ON photos(library_root, rel_path);
 """
 
 _COLUMNS = [
-    "path", "mtime", "size", "face_count",
+    "library_root", "rel_path", "mtime", "size", "face_count",
     "eye_sharpness_min", "eye_sharpness_max", "whole_image_sharpness", "fallback_used",
     "phash", "face_bboxes", "eye_bboxes",
     "iso", "shutter", "aperture", "focal_length",
     "camera", "taken_at", "indexed_at",
+]
+
+_FOLDER_COLS = [
+    "library_root", "rel_path",
+    "face_count", "eye_sharpness_min", "eye_sharpness_max",
+    "whole_image_sharpness", "fallback_used",
+    "phash", "iso", "shutter", "aperture", "focal_length", "camera", "taken_at",
 ]
 
 
@@ -38,70 +48,204 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def upsert_photo(conn: sqlite3.Connection, row: dict) -> None:
-    full = {col: row.get(col) for col in _COLUMNS}
-    if "indexed_at" not in row:
-        full["indexed_at"] = datetime.now(timezone.utc).isoformat()
-    placeholders = ", ".join(["?"] * len(_COLUMNS))
-    cols = ", ".join(_COLUMNS)
-    conn.execute(
-        f"INSERT OR REPLACE INTO photos ({cols}) VALUES ({placeholders})",
-        [full[c] for c in _COLUMNS],
-    )
-    conn.commit()
+def upsert_photo(conn: sqlite3.Connection, row: dict, library_root: str | Path = None) -> None:
+    """
+    Upsert a photo record. Automatically computes rel_path from library_root.
+
+    row: dict with photo data. If 'path' is absolute and library_root provided,
+         'rel_path' is computed automatically. Otherwise, 'rel_path' must be in row.
+    library_root: optional absolute path to compute relative path. If not provided,
+                  uses row.get('library_root') or infers from row.get('path').
+    """
+    try:
+        full = {col: row.get(col) for col in _COLUMNS}
+
+        # Determine library_root if not provided
+        if library_root is None:
+            library_root = row.get("library_root")
+        if library_root is None and row.get("path"):
+            # Infer from existing cached rows or use first path component
+            library_root = row.get("path")  # Caller must set explicitly if needed
+
+        library_root = str(Path(library_root).resolve()) if library_root else None
+
+        # Compute rel_path if not already in row
+        if "rel_path" not in row and row.get("path") and library_root:
+            try:
+                abs_path = Path(row["path"]).resolve()
+                lib_path = Path(library_root).resolve()
+                rel_path = abs_path.relative_to(lib_path)
+                full["rel_path"] = str(rel_path)
+            except ValueError as e:
+                print(f"upsert_photo: failed to compute relative path for {row.get('path')} under {library_root}: {e}", file=sys.stderr)
+                full["rel_path"] = row.get("path")
+            except TypeError as e:
+                print(f"upsert_photo: type error computing relative path: {e}", file=sys.stderr)
+                full["rel_path"] = row.get("path")
+
+        full["library_root"] = library_root or ""
+
+        if "indexed_at" not in row:
+            full["indexed_at"] = datetime.now(timezone.utc).isoformat()
+
+        placeholders = ", ".join(["?"] * len(_COLUMNS))
+        cols = ", ".join(_COLUMNS)
+        conn.execute(
+            f"INSERT OR REPLACE INTO photos ({cols}) VALUES ({placeholders})",
+            [full[c] for c in _COLUMNS],
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"upsert_photo error for path {row.get('path')}: {e}", file=sys.stderr)
 
 
-def needs_reindex(conn: sqlite3.Connection, path: str, mtime: float, size: int) -> bool:
-    row = conn.execute(
-        "SELECT mtime, size FROM photos WHERE path = ?", (path,)
-    ).fetchone()
-    if row is None:
+def needs_reindex(conn: sqlite3.Connection, path: str, mtime: float, size: int, library_root: str | Path = None) -> bool:
+    """
+    Check if a photo needs reindexing (missing from cache or file changed).
+
+    path: absolute file path
+    library_root: optional folder root. If not provided, infers from path directory.
+    Returns: True if needs reindexing, False if cached and unchanged
+    """
+    try:
+        if library_root is None:
+            library_root = str(Path(path).parent)
+
+        library_root = str(Path(library_root).resolve())
+        abs_path = Path(path).resolve()
+        lib_path = Path(library_root).resolve()
+
+        try:
+            rel_path = str(abs_path.relative_to(lib_path))
+        except ValueError as e:
+            print(f"needs_reindex: path {path} not under library_root {library_root}: {e}", file=sys.stderr)
+            return True
+
+        row = conn.execute(
+            "SELECT mtime, size FROM photos WHERE library_root = ? AND rel_path = ?",
+            (library_root, rel_path)
+        ).fetchone()
+        if row is None:
+            return True
+        return row[0] != mtime or row[1] != size
+    except Exception as e:
+        print(f"needs_reindex error for {path}: {e}", file=sys.stderr)
         return True
-    return row[0] != mtime or row[1] != size
 
 
-def get_photo(conn: sqlite3.Connection, path: str) -> dict | None:
+def get_photo(conn: sqlite3.Connection, path: str, library_root: str | Path = None) -> dict | None:
     """
     Retrieve one photo record by absolute path.
 
-    path: absolute file path (as stored in cache)
+    path: absolute file path
+    library_root: optional folder root. If not provided, infers from path directory.
     Returns: dict with all columns, or None if not in cache
     """
-    row = conn.execute(
-        "SELECT * FROM photos WHERE path = ?", (path,)
-    ).fetchone()
-    if row is None:
+    try:
+        if library_root is None:
+            library_root = str(Path(path).parent)
+
+        library_root = str(Path(library_root).resolve())
+        abs_path = Path(path).resolve()
+        lib_path = Path(library_root).resolve()
+
+        try:
+            rel_path = str(abs_path.relative_to(lib_path))
+        except ValueError as e:
+            print(f"get_photo: path {path} not under library_root {library_root}: {e}", file=sys.stderr)
+            return None
+
+        row = conn.execute(
+            "SELECT * FROM photos WHERE library_root = ? AND rel_path = ?",
+            (library_root, rel_path)
+        ).fetchone()
+        if row is None:
+            return None
+        cols = _COLUMNS
+        return dict(zip(cols, row))
+    except Exception as e:
+        print(f"get_photo error for {path}: {e}", file=sys.stderr)
         return None
-    cols = _COLUMNS
-    return dict(zip(cols, row))
 
 
-def get_photos_in_folder(conn: sqlite3.Connection, folder: str) -> list[dict]:
+def get_photo_by_abspath(conn: sqlite3.Connection, path: str) -> dict | None:
+    """
+    Retrieve one photo record by absolute path (full-path match).
+
+    Queries using reconstructed full path (library_root || '/' || rel_path).
+    Use this when library_root is unknown but the absolute path is available.
+
+    path: absolute file path
+    Returns: dict with all columns, or None if not in cache
+    """
+    try:
+        abs_path = str(Path(path).resolve())
+        row = conn.execute(
+            "SELECT * FROM photos WHERE library_root || '/' || rel_path = ?",
+            (abs_path,)
+        ).fetchone()
+        if row is None:
+            return None
+        cols = _COLUMNS
+        return dict(zip(cols, row))
+    except Exception as e:
+        print(f"get_photo_by_abspath error for {path}: {e}", file=sys.stderr)
+        return None
+
+
+def get_photos_in_folder(conn: sqlite3.Connection, folder: str, library_root: str | Path = None) -> list[dict]:
     """
     Retrieve all photos cached under a folder path (recursive).
 
-    folder: folder path (will match paths starting with this prefix)
-    Returns: list of dicts, one per photo
+    Supports both exact-match (indexed at this folder) and parent-folder queries
+    (for summarize_folder on parent of indexed folders).
+
+    folder: folder path to query
+    library_root: deprecated, ignored. Kept for backward compatibility.
+    Returns: list of dicts, one per photo under folder
     """
-    folder_path = Path(folder).resolve()
-    prefix = str(folder_path) + "/"
-    rows = conn.execute(
-        "SELECT * FROM photos WHERE path LIKE ? ORDER BY path",
-        (f"{prefix}%",)
-    ).fetchall()
-    cols = _COLUMNS
-    return [dict(zip(cols, row)) for row in rows]
+    try:
+        folder_path = Path(folder).resolve()
+        folder_str = str(folder_path)
+
+        # Query all library_roots that match the folder exactly or are subdirectories
+        cols_str = ", ".join(_FOLDER_COLS)
+        rows = conn.execute(
+            f"SELECT {cols_str} FROM photos WHERE library_root = ? OR library_root LIKE ? || '/%' ORDER BY library_root, rel_path",
+            (folder_str, folder_str)
+        ).fetchall()
+
+        result = []
+        seen_paths = set()
+        for row in rows:
+            try:
+                photo_dict = dict(zip(_FOLDER_COLS, row))
+                # Reconstruct full path and check if it's under folder (secondary guard)
+                full_path = Path(photo_dict["library_root"]) / photo_dict["rel_path"]
+                full_path_str = str(full_path)
+                if full_path_str.startswith(str(folder_path)) and full_path_str not in seen_paths:
+                    seen_paths.add(full_path_str)
+                    result.append(photo_dict)
+            except Exception as e:
+                print(f"get_photos_in_folder: error processing row: {e}", file=sys.stderr)
+                continue
+
+        return result
+    except Exception as e:
+        print(f"get_photos_in_folder error for folder {folder}: {e}", file=sys.stderr)
+        return []
 
 
-def get_all_photos(conn: sqlite3.Connection) -> list[dict]:
-    """
-    Retrieve all cached photos (unfiltered).
-
-    Returns: list of dicts, one per photo
-    """
-    rows = conn.execute("SELECT * FROM photos ORDER BY path").fetchall()
-    cols = _COLUMNS
-    return [dict(zip(cols, row)) for row in rows]
+# DEPRECATED: get_all_photos had ORDER BY path which doesn't exist in P11 schema.
+# def get_all_photos(conn: sqlite3.Connection) -> list[dict]:
+#     """
+#     Retrieve all cached photos (unfiltered).
+#
+#     Returns: list of dicts, one per photo
+#     """
+#     rows = conn.execute("SELECT * FROM photos ORDER BY path").fetchall()
+#     cols = _COLUMNS
+#     return [dict(zip(cols, row)) for row in rows]
 
 
 def hamming_distance(hash1: str, hash2: str) -> int:

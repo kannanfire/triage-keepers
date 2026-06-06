@@ -29,44 +29,55 @@ def test_init_idempotent(tmp_path):
     init_db(db)  # should not raise
 
 
-def test_upsert_inserts_row(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    row = conn.execute("SELECT path, mtime, size FROM photos WHERE path='/a.jpg'").fetchone()
-    assert row == ("/a.jpg", 1.0, 100)
+def test_upsert_inserts_row(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    row = conn.execute("SELECT rel_path, mtime, size FROM photos WHERE library_root=? AND rel_path=?",
+                      (lib_root, "a.jpg")).fetchone()
+    assert row == ("a.jpg", 1.0, 100)
 
 
-def test_upsert_replaces_on_collision(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 2.0, "size": 200})
-    rows = conn.execute("SELECT count(*) FROM photos WHERE path='/a.jpg'").fetchone()
+def test_upsert_replaces_on_collision(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 2.0, "size": 200}, library_root=lib_root)
+    rows = conn.execute("SELECT count(*) FROM photos WHERE library_root=? AND rel_path=?",
+                       (lib_root, "a.jpg")).fetchone()
     assert rows[0] == 1
-    row = conn.execute("SELECT mtime, size FROM photos WHERE path='/a.jpg'").fetchone()
+    row = conn.execute("SELECT mtime, size FROM photos WHERE library_root=? AND rel_path=?",
+                      (lib_root, "a.jpg")).fetchone()
     assert row == (2.0, 200)
 
 
-def test_upsert_sets_indexed_at(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    val = conn.execute("SELECT indexed_at FROM photos WHERE path='/a.jpg'").fetchone()[0]
+def test_upsert_sets_indexed_at(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    val = conn.execute("SELECT indexed_at FROM photos WHERE library_root=? AND rel_path=?",
+                      (lib_root, "a.jpg")).fetchone()[0]
     assert val is not None
 
 
-def test_needs_reindex_new_path(conn):
-    assert needs_reindex(conn, "/unknown.jpg", 1.0, 100) is True
+def test_needs_reindex_new_path(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    assert needs_reindex(conn, f"{lib_root}/unknown.jpg", 1.0, 100, library_root=lib_root) is True
 
 
-def test_needs_reindex_same(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    assert needs_reindex(conn, "/a.jpg", 1.0, 100) is False
+def test_needs_reindex_same(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    assert needs_reindex(conn, f"{lib_root}/a.jpg", 1.0, 100, library_root=lib_root) is False
 
 
-def test_needs_reindex_changed_mtime(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    assert needs_reindex(conn, "/a.jpg", 9.0, 100) is True
+def test_needs_reindex_changed_mtime(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    assert needs_reindex(conn, f"{lib_root}/a.jpg", 9.0, 100, library_root=lib_root) is True
 
 
-def test_needs_reindex_changed_size(conn):
-    upsert_photo(conn, {"path": "/a.jpg", "mtime": 1.0, "size": 100})
-    assert needs_reindex(conn, "/a.jpg", 1.0, 999) is True
+def test_needs_reindex_changed_size(conn, tmp_path):
+    lib_root = str(tmp_path / "photos")
+    upsert_photo(conn, {"path": f"{lib_root}/a.jpg", "mtime": 1.0, "size": 100}, library_root=lib_root)
+    assert needs_reindex(conn, f"{lib_root}/a.jpg", 1.0, 999, library_root=lib_root) is True
 
 
 def test_group_by_phash_with_time_window(conn):
