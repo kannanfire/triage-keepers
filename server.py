@@ -224,7 +224,7 @@ def assess_subject_sharpness(path: str) -> dict:
 
 
 @mcp.tool()
-def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10, limit: int = 50, count_only: bool = False) -> dict:
+def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int = 10, limit: int = 50, count_only: bool = False, absolute_rate: float = 50.0) -> dict:
     """
     Find photos in folder below sharpness threshold.
 
@@ -240,6 +240,7 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
     percentile: used only in relative mode (default 10 = bottom decile)
     limit: max rows returned (default 50). Ignored if count_only=True.
     count_only: when True, return {"count": N, "folder": folder} only (default False)
+    absolute_rate: configurable percentage value if mode is absolute (default is 50.0)
     Returns: dict with "count", "folder", and optionally "results" list
     """
     conn = _get_conn()
@@ -253,7 +254,7 @@ def find_unsharp_subjects(folder: str, mode: str = "relative", percentile: int =
         cutoff = max(1, len(scoreable) * percentile // 100)
         result_set = scoreable[:cutoff]
     elif mode == "absolute":
-        result_set = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < 50.0]
+        result_set = [p for p in photos if p.get("eye_sharpness_min") and float(p.get("eye_sharpness_min", 999)) < absolute_rate]
         result_set.sort(key=lambda p: float(p["eye_sharpness_min"]))
     else:
         return {"error": f"Unknown mode: {mode}"}
